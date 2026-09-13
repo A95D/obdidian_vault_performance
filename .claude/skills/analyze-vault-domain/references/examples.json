@@ -1,0 +1,326 @@
+{
+  "examples": [
+    {
+      "title": "Полный анализ домена: Architecture (3 файла)",
+      "domain_id": "architecture",
+      "analysis": {
+        "domain_id": "architecture",
+        "domain_name": "System Architecture",
+        "analysis_date": "2026-08-02",
+        "total_files": 3,
+        "analysis_status": "success",
+        "files": [
+          {
+            "id": "file_1",
+            "path": "docs/architecture/overview.md",
+            "name": "overview",
+            "title": "System Architecture Overview",
+            "essence": "Краткий обзор многослойной архитектуры системы и основных принципов её проектирования.",
+            "role": "Входная точка для новичков, задаёт общий контекст",
+            "type": "overview",
+            "difficulty": "beginner",
+            "level": "overview",
+            "key_concepts": [
+              "архитектура",
+              "слой",
+              "компонент",
+              "зависимость",
+              "масштабируемость"
+            ],
+            "mentions": [],
+            "dependencies": []
+          },
+          {
+            "id": "file_2",
+            "path": "docs/architecture/components.md",
+            "name": "components",
+            "title": "System Components",
+            "essence": "Детальное описание каждого компонента системы, его интерфейсов, ответственности и интеграции.",
+            "role": "Справочник компонентов для разработчиков",
+            "type": "reference",
+            "difficulty": "intermediate",
+            "level": "deep-dive",
+            "key_concepts": [
+              "компонент",
+              "интерфейс",
+              "зависимость",
+              "контракт",
+              "изоляция",
+              "DI контейнер"
+            ],
+            "mentions": [
+              "overview.md",
+              "patterns.md"
+            ],
+            "dependencies": [
+              "overview.md"
+            ]
+          },
+          {
+            "id": "file_3",
+            "path": "docs/architecture/patterns.md",
+            "name": "patterns",
+            "title": "Architecture Patterns",
+            "essence": "Архитектурные паттерны и best practices для решения типовых задач проектирования.",
+            "role": "Справочник паттернов для архитектурных решений",
+            "type": "pattern",
+            "difficulty": "advanced",
+            "level": "deep-dive",
+            "key_concepts": [
+              "паттерн",
+              "инверсия зависимостей",
+              "слоение",
+              "модульность",
+              "тестируемость",
+              "масштабируемость"
+            ],
+            "mentions": [
+              "overview.md",
+              "components.md"
+            ],
+            "dependencies": [
+              "components.md"
+            ]
+          }
+        ],
+        "domain_summary": {
+          "key_themes": [
+            "Многослойная архитектура",
+            "Компонентный подход",
+            "Инверсия зависимостей",
+            "Масштабируемость и модульность"
+          ],
+          "main_concepts": [
+            "архитектура",
+            "компонент",
+            "слой",
+            "интерфейс",
+            "зависимость",
+            "DI контейнер",
+            "паттерн",
+            "инверсия зависимостей",
+            "модульность",
+            "тестируемость"
+          ],
+          "content_distribution": {
+            "by_type": {
+              "overview": 1,
+              "reference": 1,
+              "pattern": 1
+            },
+            "by_difficulty": {
+              "beginner": 1,
+              "intermediate": 1,
+              "advanced": 1
+            }
+          },
+          "dependencies_overview": "overview.md → components.md → patterns.md (цепочка от базового к продвинутому)"
+        }
+      }
+    },
+    {
+      "title": "Малый анализ: Concepts (2 файла)",
+      "domain_id": "concepts",
+      "analysis": {
+        "domain_id": "concepts",
+        "domain_name": "Core Concepts",
+        "analysis_date": "2026-08-02",
+        "total_files": 2,
+        "analysis_status": "success",
+        "files": [
+          {
+            "id": "file_1",
+            "path": "docs/concepts/fundamentals.md",
+            "name": "fundamentals",
+            "title": "Core Fundamentals",
+            "essence": "Базовые концепции и терминология системы.",
+            "role": "Основа для понимания всего остального",
+            "type": "concept",
+            "difficulty": "beginner",
+            "level": "overview",
+            "key_concepts": [
+              "концепция",
+              "терминология",
+              "основы",
+              "определения"
+            ],
+            "mentions": [],
+            "dependencies": []
+          },
+          {
+            "id": "file_2",
+            "path": "docs/concepts/advanced-ideas.md",
+            "name": "advanced-ideas",
+            "title": "Advanced Concepts",
+            "essence": "Продвинутые концепции и расширенные идеи системы.",
+            "role": "Для глубокого понимания архитектурных решений",
+            "type": "concept",
+            "difficulty": "advanced",
+            "level": "deep-dive",
+            "key_concepts": [
+              "абстракция",
+              "композиция",
+              "полиморфизм",
+              "контравариантность"
+            ],
+            "mentions": [
+              "fundamentals.md"
+            ],
+            "dependencies": [
+              "fundamentals.md"
+            ]
+          }
+        ],
+        "domain_summary": {
+          "key_themes": [
+            "Основные концепции",
+            "Продвинутые идеи",
+            "Терминология"
+          ],
+          "main_concepts": [
+            "концепция",
+            "абстракция",
+            "композиция",
+            "полиморфизм",
+            "контравариантность",
+            "определения"
+          ],
+          "content_distribution": {
+            "by_type": {
+              "concept": 2
+            },
+            "by_difficulty": {
+              "beginner": 1,
+              "advanced": 1
+            }
+          },
+          "dependencies_overview": "fundamentals.md → advanced-ideas.md"
+        }
+      }
+    },
+    {
+      "title": "Partial статус: файл повреждён",
+      "domain_id": "methodology",
+      "analysis": {
+        "domain_id": "methodology",
+        "domain_name": "Development Methodology",
+        "analysis_date": "2026-08-02",
+        "total_files": 3,
+        "analysis_status": "partial",
+        "files": [
+          {
+            "id": "file_1",
+            "path": "docs/methodology/overview.md",
+            "name": "overview",
+            "title": "Development Methodology Overview",
+            "essence": "Описание методологии разработки проекта.",
+            "role": "Введение в методологию",
+            "type": "overview",
+            "difficulty": "beginner",
+            "level": "overview",
+            "key_concepts": [
+              "методология",
+              "процесс",
+              "этапы"
+            ],
+            "mentions": [],
+            "dependencies": []
+          },
+          {
+            "id": "file_2",
+            "path": "docs/methodology/processes.md",
+            "name": "processes",
+            "title": null,
+            "essence": "null",
+            "role": "SKIPPED: Файл не прочитан (повреждён или заблокирован)",
+            "type": null,
+            "difficulty": null,
+            "level": "reference",
+            "key_concepts": [],
+            "mentions": [],
+            "dependencies": []
+          },
+          {
+            "id": "file_3",
+            "path": "docs/methodology/checklist.md",
+            "name": "checklist",
+            "title": "Development Stages Checklist",
+            "essence": "Чек-лист этапов разработки.",
+            "role": "Практический гайд для команды",
+            "type": "checklist",
+            "difficulty": "intermediate",
+            "level": "reference",
+            "key_concepts": [
+              "чек-лист",
+              "этап",
+              "контроль качества"
+            ],
+            "mentions": [
+              "overview.md"
+            ],
+            "dependencies": [
+              "overview.md"
+            ]
+          }
+        ],
+        "domain_summary": {
+          "key_themes": [
+            "Процесс разработки",
+            "Методология",
+            "Контроль качества"
+          ],
+          "main_concepts": [
+            "методология",
+            "процесс",
+            "этап",
+            "чек-лист",
+            "контроль качества"
+          ],
+          "content_distribution": {
+            "by_type": {
+              "overview": 1,
+              "checklist": 1
+            },
+            "by_difficulty": {
+              "beginner": 1,
+              "intermediate": 1
+            }
+          },
+          "dependencies_overview": "overview.md → [processes.md (не обработан), checklist.md]"
+        }
+      }
+    }
+  ],
+  "input_examples": [
+    {
+      "title": "Входные данные для анализа domain_id='architecture'",
+      "domain_id": "architecture",
+      "domain_name": "System Architecture",
+      "domain_files": [
+        {
+          "path": "docs/architecture/overview.md",
+          "name": "overview"
+        },
+        {
+          "path": "docs/architecture/components.md",
+          "name": "components"
+        },
+        {
+          "path": "docs/architecture/patterns.md",
+          "name": "patterns"
+        }
+      ]
+    },
+    {
+      "title": "Входные данные для малого домена (1 файл)",
+      "domain_id": "intro",
+      "domain_name": "Introduction",
+      "domain_files": [
+        {
+          "path": "docs/readme.md",
+          "name": "readme"
+        }
+      ]
+    }
+  ]
+}
