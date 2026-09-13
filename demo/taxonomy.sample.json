@@ -1,0 +1,82 @@
+{
+  "metadata": {
+    "analysis_date": "2026-09-01",
+    "vault_path": "demo/fake-vault",
+    "total_files": 24,
+    "total_domains": 4
+  },
+  "domains": [
+    {
+      "domain_id": "architecture",
+      "domain_name": "System Architecture",
+      "file_count": 7,
+      "files": [
+        { "id": "f1", "path": "architecture/overview.md", "title": "Architecture Overview", "type": "overview", "difficulty": "beginner", "technologies": ["draw.io"] },
+        { "id": "f2", "path": "architecture/components.md", "title": "System Components", "type": "reference", "difficulty": "intermediate", "technologies": ["docker", "kubernetes"] },
+        { "id": "f3", "path": "architecture/event-bus.md", "title": "Event Bus Design", "type": "pattern", "difficulty": "advanced", "technologies": ["kafka", "docker"] },
+        { "id": "f4", "path": "architecture/api-gateway.md", "title": "API Gateway", "type": "reference", "difficulty": "intermediate", "technologies": ["nginx", "docker"] },
+        { "id": "f5", "path": "architecture/scaling.md", "title": "Scaling Strategies", "type": "pattern", "difficulty": "advanced", "technologies": ["kubernetes"] },
+        { "id": "f6", "path": "architecture/data-flow.md", "title": "Data Flow", "type": "concept", "difficulty": "beginner", "technologies": [] },
+        { "id": "f7", "path": "architecture/security.md", "title": "Security Model", "type": "reference", "difficulty": "advanced", "technologies": ["oauth2"] }
+      ],
+      "learning_paths": {
+        "beginner": { "files": ["f1", "f6"], "estimated_hours": 2 },
+        "intermediate": { "files": ["f2", "f4"], "estimated_hours": 4 },
+        "advanced": { "files": ["f3", "f5", "f7"], "estimated_hours": 7 }
+      }
+    },
+    {
+      "domain_id": "data-engineering",
+      "domain_name": "Data Engineering",
+      "file_count": 6,
+      "files": [
+        { "id": "f8", "path": "data/etl-basics.md", "title": "ETL Basics", "type": "overview", "difficulty": "beginner", "technologies": ["python", "sql"] },
+        { "id": "f9", "path": "data/dbt-models.md", "title": "dbt Models", "type": "reference", "difficulty": "intermediate", "technologies": ["dbt", "sql", "postgresql"] },
+        { "id": "f10", "path": "data/airflow-dags.md", "title": "Airflow DAGs", "type": "reference", "difficulty": "intermediate", "technologies": ["airflow", "python"] },
+        { "id": "f11", "path": "data/data-quality.md", "title": "Data Quality Checks", "type": "checklist", "difficulty": "intermediate", "technologies": ["dbt", "python"] },
+        { "id": "f12", "path": "data/streaming.md", "title": "Streaming Pipelines", "type": "pattern", "difficulty": "advanced", "technologies": ["kafka", "python"] },
+        { "id": "f13", "path": "data/warehouse-design.md", "title": "Warehouse Design", "type": "pattern", "difficulty": "advanced", "technologies": ["postgresql", "sql"] }
+      ],
+      "learning_paths": {
+        "beginner": { "files": ["f8"], "estimated_hours": 1.5 },
+        "intermediate": { "files": ["f9", "f10", "f11"], "estimated_hours": 5 },
+        "advanced": { "files": ["f12", "f13"], "estimated_hours": 6 }
+      }
+    },
+    {
+      "domain_id": "methodology",
+      "domain_name": "Development Methodology",
+      "file_count": 5,
+      "files": [
+        { "id": "f14", "path": "methodology/overview.md", "title": "Methodology Overview", "type": "overview", "difficulty": "beginner", "technologies": [] },
+        { "id": "f15", "path": "methodology/code-review.md", "title": "Code Review Guide", "type": "checklist", "difficulty": "beginner", "technologies": ["git"] },
+        { "id": "f16", "path": "methodology/testing-strategy.md", "title": "Testing Strategy", "type": "reference", "difficulty": "intermediate", "technologies": ["pytest"] },
+        { "id": "f17", "path": "methodology/release-process.md", "title": "Release Process", "type": "checklist", "difficulty": "intermediate", "technologies": ["git", "docker"] },
+        { "id": "f18", "path": "methodology/incident-response.md", "title": "Incident Response", "type": "pattern", "difficulty": "advanced", "technologies": [] }
+      ],
+      "learning_paths": {
+        "beginner": { "files": ["f14", "f15"], "estimated_hours": 1 },
+        "intermediate": { "files": ["f16", "f17"], "estimated_hours": 3 },
+        "advanced": { "files": ["f18"], "estimated_hours": 2 }
+      }
+    },
+    {
+      "domain_id": "ml-notes",
+      "domain_name": "Machine Learning Notes",
+      "file_count": 6,
+      "files": [
+        { "id": "f19", "path": "ml/fundamentals.md", "title": "ML Fundamentals", "type": "concept", "difficulty": "beginner", "technologies": ["python"] },
+        { "id": "f20", "path": "ml/feature-engineering.md", "title": "Feature Engineering", "type": "reference", "difficulty": "intermediate", "technologies": ["python", "sql"] },
+        { "id": "f21", "path": "ml/model-eval.md", "title": "Model Evaluation", "type": "reference", "difficulty": "intermediate", "technologies": ["python"] },
+        { "id": "f22", "path": "ml/embeddings.md", "title": "Embeddings Deep Dive", "type": "concept", "difficulty": "advanced", "technologies": ["python"] },
+        { "id": "f23", "path": "ml/serving.md", "title": "Model Serving", "type": "pattern", "difficulty": "advanced", "technologies": ["docker", "kubernetes"] },
+        { "id": "f24", "path": "ml/experiment-tracking.md", "title": "Experiment Tracking", "type": "reference", "difficulty": "intermediate", "technologies": ["python"] }
+      ],
+      "learning_paths": {
+        "beginner": { "files": ["f19"], "estimated_hours": 1.5 },
+        "intermediate": { "files": ["f20", "f21", "f24"], "estimated_hours": 5 },
+        "advanced": { "files": ["f22", "f23"], "estimated_hours": 6 }
+      }
+    }
+  ]
+}

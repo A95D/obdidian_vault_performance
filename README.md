@@ -4,6 +4,9 @@
 На основе содержимого файлов строит таксономию доменов, типов контента,
 learning paths и фасетной навигации, а результат показывает в веб-дашборде.
 
+**[🔗 Живое демо дашборда](https://a95d.github.io/obdidian_vault_performance/demo/dashboard.demo.html)**
+на фейковых данных — показывает, как выглядит результат анализа.
+
 ## Что делает
 
 1. Сканирует ваш Obsidian vault по указанному пути.
@@ -68,6 +71,7 @@ obdidian_vault_performance/
 ├── start-dashboard.bat     ← запуск локального сервера + открытие дашборда
 ├── requirements.txt        ← python-зависимости
 ├── .env / .env.example     ← VAULT_PATH и другие переменные окружения
+├── demo/                   ← демо-дашборд с фейковыми данными (GitHub Pages)
 └── .claude/
     ├── agents/             ← vault-domain-analyzer.md
     ├── skills/             ← analyze-vault-domain, semantic-taxonomy, vault-migration

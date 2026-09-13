@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Obsidian Vault Statistics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* ── Тёплая бежевая палитра (Paper) ── */
+            --bg: #faf9f7;
+            --surface: #ffffff;
+            --surface-2: #f4f2ee;
+            --border: #eae7e1;
+            --border-strong: #d8d3ca;
+
+            --text: #1c1917;
+            --text-2: #57534e;
+            --text-3: #a8a29e;
+
+            --accent: #d97706;
+            --accent-hover: #b45309;
+            --accent-soft: #fef3c7;
+            --accent-text: #ffffff;
+
+            /* Сложность */
+            --beginner: #10b981;
+            --intermediate: #f59e0b;
+            --advanced: #ef4444;
+
+            --radius-sm: 8px;
+            --radius: 12px;
+            --radius-lg: 16px;
+
+            --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.04);
+            --shadow: 0 1px 2px rgba(28, 25, 23, 0.04), 0 1px 3px rgba(28, 25, 23, 0.06);
+            --shadow-md: 0 4px 12px rgba(28, 25, 23, 0.06), 0 1px 3px rgba(28, 25, 23, 0.04);
+
+            --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        .container {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 3rem 2rem 5rem;
+        }
+
+        /* ═══════════ HEADER ═══════════ */
+        header {
+            margin-bottom: 3rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 {
+            font-size: clamp(1.75rem, 3.5vw, 2.25rem);
+            font-weight: 700;
+            letter-spacing: -0.025em;
+            margin-bottom: 0.5rem;
+            color: var(--text);
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            color: var(--text-2);
+            margin-bottom: 1.25rem;
+        }
+
+        .metadata {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.4rem 0.75rem;
+            font-size: 0.82rem;
+            color: var(--text-2);
+            padding: 0.4rem 0.9rem;
+            background: var(--surface-2);
+            border-radius: 999px;
+        }
+
+        /* ═══════════ АНИМАЦИИ ═══════════ */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        section {
+            margin-bottom: 3rem;
+            animation: fadeInUp 0.4s var(--transition) both;
+        }
+
+        section:nth-of-type(1) { animation-delay: 0.04s; }
+        section:nth-of-type(2) { animation-delay: 0.08s; }
+        section:nth-of-type(3) { animation-delay: 0.12s; }
+        section:nth-of-type(4) { animation-delay: 0.16s; }
+
+        h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            letter-spacing: -0.015em;
+            margin-bottom: 1.25rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* ═══════════ STATS ═══════════ */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.25rem 1.5rem;
+            transition: all 0.2s var(--transition);
+            animation: fadeInUp 0.4s var(--transition) both;
+        }
+
+        .stat-card:hover {
+            border-color: var(--border-strong);
+            box-shadow: var(--shadow-md);
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            line-height: 1.1;
+            color: var(--accent);
+            font-variant-numeric: tabular-nums;
+            margin-bottom: 0.15rem;
+        }
+
+        .stat-label {
+            font-size: 0.78rem;
+            color: var(--text-2);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        /* ═══════════ BAR CHART ═══════════ */
+        .chart-container {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.75rem;
+        }
+
+        .bar-chart {
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+        }
+
+        .bar-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            animation: fadeInUp 0.4s var(--transition) both;
+        }
+
+        .bar-label {
+            min-width: 180px;
+            max-width: 180px;
+            font-weight: 500;
+            font-size: 0.88rem;
+            color: var(--text);
+            flex-shrink: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .bar-wrapper {
+            flex: 1;
+            min-width: 0;
+            background: var(--surface-2);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .bar {
+            height: 32px;
+            background: var(--accent);
+            border-radius: 6px;
+            position: relative;
+            display: flex;
+            align-items: center;
+            min-width: 44px;
+            transition: width 0.7s var(--transition);
+        }
+
+        .bar-value {
+            margin-left: auto;
+            margin-right: 0.65rem;
+            color: var(--accent-text);
+            font-weight: 600;
+            font-size: 0.82rem;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* ═══════════ DOMAIN CARDS ═══════════ */
+        .domains-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1rem;
+        }
+
+        .domain-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: all 0.2s var(--transition);
+            animation: fadeInUp 0.4s var(--transition) both;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .domain-card:hover {
+            border-color: var(--border-strong);
+            box-shadow: var(--shadow-md);
+        }
+
+        .domain-header {
+            padding: 1.25rem 1.5rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .domain-name {
+            font-size: 1.05rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 0.5rem;
+            color: var(--text);
+        }
+
+        .domain-stats {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            font-size: 0.82rem;
+        }
+
+        .file-count {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-weight: 500;
+            color: var(--text-2);
+        }
+
+        /* ═══════════ DIFFICULTY ═══════════ */
+        .difficulty-chart {
+            display: flex;
+            gap: 3px;
+            height: 6px;
+            border-radius: 999px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .difficulty-bar {
+            border-radius: 999px;
+            transition: flex 0.4s var(--transition);
+        }
+
+        .difficulty-bar.beginner     { background: var(--beginner); }
+        .difficulty-bar.intermediate { background: var(--intermediate); }
+        .difficulty-bar.advanced     { background: var(--advanced); }
+
+        .difficulty-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem 0.85rem;
+            margin-top: 0.5rem;
+            font-size: 0.72rem;
+            font-weight: 500;
+            color: var(--text-2);
+        }
+
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+
+        .legend-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .legend-dot.beginner     { background: var(--beginner); }
+        .legend-dot.intermediate { background: var(--intermediate); }
+        .legend-dot.advanced     { background: var(--advanced); }
+
+        /* ═══════════ LEARNING PATHS ═══════════ */
+        .domain-body {
+            padding: 1rem 1.5rem 1.25rem;
+            flex: 1;
+        }
+
+        .learning-paths {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .learning-path {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.6rem 0.85rem;
+            background: var(--surface-2);
+            border-radius: var(--radius-sm);
+            transition: background 0.2s var(--transition);
+        }
+
+        .learning-path:hover {
+            background: var(--accent-soft);
+        }
+
+        .path-level {
+            font-weight: 600;
+            color: var(--accent);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .path-hours {
+            font-size: 0.78rem;
+            color: var(--text-2);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .no-paths {
+            color: var(--text-3);
+            font-size: 0.82rem;
+            font-style: italic;
+        }
+
+        /* ═══════════ TECHNOLOGIES ═══════════ */
+        .technologies {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .tech-tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.4rem 0.85rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text);
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            transition: all 0.2s var(--transition);
+            cursor: default;
+        }
+
+        .tech-tag:hover {
+            background: var(--accent);
+            color: var(--accent-text);
+            border-color: var(--accent);
+        }
+
+        /* ═══════════ LOADING / ERROR ═══════════ */
+        .loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            padding: 4rem 2rem;
+            color: var(--text-2);
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        .loading::before {
+            content: '';
+            width: 32px;
+            height: 32px;
+            border: 2.5px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        .error {
+            background: #fef2f2;
+            color: #b91c1c;
+            padding: 1rem 1.25rem;
+            border-radius: var(--radius);
+            border: 1px solid #fecaca;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        footer { display: none; }
+
+        /* ═══════════ RESPONSIVE ═══════════ */
+        @media (max-width: 768px) {
+            .container { padding: 2rem 1rem 3rem; }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 0.6rem;
+            }
+
+            .stat-card { padding: 1rem; }
+            .stat-number { font-size: 1.6rem; }
+
+            .domains-grid {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+            }
+
+            .chart-container { padding: 1.25rem; }
+
+            .bar-label {
+                min-width: 110px;
+                max-width: 110px;
+                font-size: 0.8rem;
+            }
+
+            .bar { height: 28px; }
+            h2 { font-size: 1.05rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Obsidian Vault Statistics <span style="font-size: 0.9rem; color: var(--text-3); font-weight: 500;">(demo)</span></h1>
+            <p class="subtitle">Демонстрация на фейковых данных — реальный анализ строится через skill semantic-taxonomy</p>
+            <p class="metadata" id="metadata">Загрузка...</p>
+        </header>
+
+        <div id="loading" class="loading">Загрузка данных</div>
+        <div id="error"></div>
+        <div id="content" style="display: none;">
+            <section>
+                <div class="stats-grid" id="statsGrid"></div>
+            </section>
+
+            <section>
+                <h2>📚 Распределение по доменам</h2>
+                <div class="chart-container">
+                    <div class="bar-chart" id="domainChart"></div>
+                </div>
+            </section>
+
+            <section>
+                <h2>🏛️ Детальный анализ доменов</h2>
+                <div class="domains-grid" id="domainsGrid"></div>
+            </section>
+
+            <section>
+                <h2>⚙️ Используемые технологии</h2>
+                <div class="chart-container">
+                    <div class="technologies" id="techsList"></div>
+                </div>
+            </section>
+        </div>
+
+        <footer><p id="footerDate"></p></footer>
+    </div>
+
+    <script>
+        /* ═══════════ ЗАГРУЗКА ДАННЫХ ═══════════ */
+
+        async function loadDashboard() {
+            try {
+                const response = await fetch('./taxonomy.sample.json');
+                if (!response.ok) {
+                    throw new Error(`Не удалось загрузить taxonomy.json (HTTP ${response.status})`);
+                }
+
+                const data = await response.json();
+                renderDashboard(data);
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').innerHTML =
+                    `<div class="error">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        /* ═══════════ РЕНДЕРИНГ ═══════════ */
+
+        function renderDashboard(data) {
+            const { metadata, domains } = data;
+
+            document.getElementById('metadata').innerHTML =
+                `📅 ${metadata.analysis_date} · 📁 ${metadata.vault_path}`;
+
+            renderStats(calculateStats(domains));
+            renderDomainChart(domains);
+            renderDomainCards(domains);
+            renderTechnologies(domains);
+        }
+
+        function calculateStats(domains) {
+            return {
+                totalFiles: domains.reduce((sum, d) => sum + d.file_count, 0),
+                totalDomains: domains.length
+            };
+        }
+
+        function renderStats(stats) {
+            const grid = document.getElementById('statsGrid');
+            const items = [
+                { label: 'Файлов', value: stats.totalFiles },
+                { label: 'Доменов', value: stats.totalDomains }
+            ];
+            grid.innerHTML = items.map((s, i) => `
+                <div class="stat-card" style="animation-delay: ${i * 0.06}s;">
+                    <div class="stat-number">${s.value}</div>
+                    <div class="stat-label">${s.label}</div>
+                </div>
+            `).join('');
+        }
+
+        function renderDomainChart(domains) {
+            const chart = document.getElementById('domainChart');
+            const active = domains
+                .filter(d => d.file_count > 0)
+                .sort((a, b) => b.file_count - a.file_count);
+            const max = Math.max(...active.map(d => d.file_count));
+
+            chart.innerHTML = active.map((d, i) => {
+                const pct = (d.file_count / max) * 100;
+                return `
+                    <div class="bar-item" style="animation-delay: ${i * 0.04}s;">
+                        <div class="bar-label" title="${d.domain_name}">${d.domain_name}</div>
+                        <div class="bar-wrapper">
+                            <div class="bar" style="width: ${pct}%;">
+                                <span class="bar-value">${d.file_count}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function calcDifficulty(domain) {
+            const dist = { beginner: 0, intermediate: 0, advanced: 0 };
+            (domain.files || []).forEach(f => {
+                if (f.difficulty && dist.hasOwnProperty(f.difficulty)) dist[f.difficulty]++;
+            });
+            return dist;
+        }
+
+        function renderDifficulty(dist) {
+            const total = dist.beginner + dist.intermediate + dist.advanced;
+            if (total === 0) return '';
+
+            const labels = { beginner: 'Начальный', intermediate: 'Средний', advanced: 'Продвинутый' };
+
+            const bars = Object.entries(dist)
+                .filter(([_, c]) => c > 0)
+                .map(([lvl, c]) => {
+                    const pct = Math.round((c / total) * 100);
+                    return `<div class="difficulty-bar ${lvl}" style="flex: ${c}" title="${labels[lvl]}: ${c} (${pct}%)"></div>`;
+                }).join('');
+
+            const legend = Object.entries(dist)
+                .filter(([_, c]) => c > 0)
+                .map(([lvl, c]) =>
+                    `<span class="legend-item"><span class="legend-dot ${lvl}"></span>${labels[lvl]} · ${c}</span>`
+                ).join('');
+
+            return `
+                <div class="difficulty-chart">${bars}</div>
+                <div class="difficulty-legend">${legend}</div>
+            `;
+        }
+
+        function renderDomainCards(domains) {
+            const grid = document.getElementById('domainsGrid');
+            const active = domains.filter(d => d.file_count > 0);
+
+            grid.innerHTML = active.map((d, i) => {
+                const paths = Object.entries(d.learning_paths || {})
+                    .filter(([_, p]) => p.files && p.files.length > 0);
+
+                const pathsHtml = paths.map(([lvl, p]) => `
+                    <div class="learning-path">
+                        <span class="path-level">${lvl.charAt(0).toUpperCase() + lvl.slice(1)}</span>
+                        <span class="path-hours">📚 ${p.files.length} · ⏱️ ${p.estimated_hours}ч</span>
+                    </div>
+                `).join('');
+
+                const diff = calcDifficulty(d);
+
+                return `
+                    <div class="domain-card" style="animation-delay: ${i * 0.05}s;">
+                        <div class="domain-header">
+                            <div class="domain-name">${d.domain_name}</div>
+                            <div class="domain-stats">
+                                <span class="file-count">📄 ${d.file_count} файлов</span>
+                                ${renderDifficulty(diff)}
+                            </div>
+                        </div>
+                        <div class="domain-body">
+                            ${paths.length > 0
+                                ? `<div class="learning-paths">${pathsHtml}</div>`
+                                : '<p class="no-paths">Нет обучающих путей</p>'}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderTechnologies(domains) {
+            const techCount = {};
+            const seen = new Set();
+
+            domains.forEach(d => {
+                (d.files || []).forEach(f => {
+                    (f.technologies || []).forEach(t => {
+                        const norm = t.trim().toLowerCase();
+                        if (norm && !seen.has(norm)) {
+                            seen.add(norm);
+                            techCount[t.trim()] = (techCount[t.trim()] || 0) + 1;
+                        }
+                    });
+                });
+            });
+
+            const top = Object.entries(techCount)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 30)
+                .map(([t]) => t);
+
+            document.getElementById('techsList').innerHTML =
+                top.map(t => `<span class="tech-tag">${t}</span>`).join('');
+        }
+
+        window.addEventListener('DOMContentLoaded', loadDashboard);
+    </script>
+</body>
+</html>
