@@ -465,13 +465,192 @@
             .bar { height: 28px; }
             h2 { font-size: 1.05rem; }
         }
+
+        /* ═══════════ TOPIC MODAL (макет C: список + детали) ═══════════ */
+        .domain-card { cursor: pointer; }
+
+        .topic-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(28, 25, 23, 0.45);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            z-index: 1000;
+        }
+
+        .topic-modal-overlay[hidden] { display: none !important; }
+
+        .topic-modal {
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            width: 880px;
+            max-width: 100%;
+            max-height: 88vh;
+            display: flex;
+            overflow: hidden;
+            box-shadow: var(--shadow-md);
+        }
+
+        .topic-modal-close {
+            background: none;
+            border: none;
+            font-size: 1.3rem;
+            line-height: 1;
+            color: var(--text-3);
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+        }
+
+        .topic-modal-close:hover { color: var(--text); }
+
+        .topic-modal-col-left {
+            width: 260px;
+            flex-shrink: 0;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .topic-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.1rem 1.1rem 0.75rem;
+        }
+
+        .topic-modal-header h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .topic-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.6rem 1.1rem;
+            font-size: 0.85rem;
+            cursor: pointer;
+            border-left: 3px solid transparent;
+            color: var(--text-2);
+        }
+
+        .topic-list-item:hover { background: var(--surface-2); }
+
+        .topic-list-item.active {
+            background: var(--surface-2);
+            border-left-color: var(--accent);
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .topic-list-pct { font-size: 0.78rem; color: var(--text-3); }
+        .topic-list-pct.low { color: var(--advanced); }
+
+        .topic-modal-col-right {
+            flex: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+        }
+
+        .topic-detail-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+
+        .topic-not-studied-badge {
+            display: inline-block;
+            font-size: 0.72rem;
+            background: #fee2e2;
+            color: #b91c1c;
+            padding: 0.1rem 0.5rem;
+            border-radius: 999px;
+            margin-left: 0.5rem;
+            font-weight: 500;
+            vertical-align: middle;
+        }
+
+        .topic-progress-bar {
+            height: 8px;
+            background: var(--surface-2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0.75rem 0;
+        }
+
+        .topic-progress-fill {
+            height: 100%;
+            background: var(--accent);
+        }
+
+        .topic-detail-summary {
+            font-size: 0.88rem;
+            color: var(--text-2);
+        }
+
+        .topic-detail-rationale {
+            font-size: 0.8rem;
+            color: var(--text-3);
+            font-style: italic;
+            margin-top: 0.5rem;
+        }
+
+        .topic-rec-block {
+            margin-top: 1.5rem;
+            border-top: 1px solid var(--border);
+            padding-top: 1rem;
+        }
+
+        .topic-rec-block h3 {
+            font-size: 0.85rem;
+            color: var(--text-2);
+            margin-bottom: 0.6rem;
+        }
+
+        .topic-rec-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            padding: 0.4rem 0;
+            color: var(--text);
+        }
+
+        .topic-rec-row .topic-rec-cross {
+            font-size: 0.72rem;
+            color: var(--accent-hover);
+            display: block;
+        }
+
+        .topic-modal-empty-state {
+            padding: 2rem 1.5rem;
+            color: var(--text-2);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+
+        @media (max-width: 640px) {
+            .topic-modal { flex-direction: column; max-height: 92vh; }
+            .topic-modal-col-left {
+                width: 100%;
+                max-height: 35vh;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Obsidian Vault Statistics <span style="font-size: 0.9rem; color: var(--text-3); font-weight: 500;">(demo)</span></h1>
-            <p class="subtitle">Демонстрация на фейковых данных — реальный анализ строится через skill semantic-taxonomy</p>
+            <h1>Obsidian Vault Statistics</h1>
+            <p class="subtitle">Анализ структуры вашего хранилища знаний</p>
             <p class="metadata" id="metadata">Загрузка...</p>
         </header>
 
@@ -505,17 +684,35 @@
         <footer><p id="footerDate"></p></footer>
     </div>
 
+    <div class="topic-modal-overlay" id="topicModalOverlay" hidden>
+        <div class="topic-modal" role="dialog" aria-modal="true" aria-labelledby="topicModalDomainName">
+            <div class="topic-modal-col-left">
+                <div class="topic-modal-header">
+                    <h2 id="topicModalDomainName"></h2>
+                    <button class="topic-modal-close" id="topicModalClose" aria-label="Закрыть">✕</button>
+                </div>
+                <div id="topicModalList"></div>
+            </div>
+            <div class="topic-modal-col-right" id="topicModalDetail"></div>
+        </div>
+    </div>
+
     <script>
         /* ═══════════ ЗАГРУЗКА ДАННЫХ ═══════════ */
 
+        let domainsById = {};
+
         async function loadDashboard() {
             try {
+                let data;
+
+                // Загрузить демо-таксономию (всегда из текущей папки)
                 const response = await fetch('./taxonomy.sample.json');
                 if (!response.ok) {
-                    throw new Error(`Не удалось загрузить taxonomy.json (HTTP ${response.status})`);
+                    throw new Error(`Не удалось загрузить taxonomy.sample.json (HTTP ${response.status})`);
                 }
+                data = await response.json();
 
-                const data = await response.json();
                 renderDashboard(data);
 
                 document.getElementById('loading').style.display = 'none';
@@ -531,6 +728,8 @@
 
         function renderDashboard(data) {
             const { metadata, domains } = data;
+
+            domainsById = Object.fromEntries(domains.map(d => [d.domain_id, d]));
 
             document.getElementById('metadata').innerHTML =
                 `📅 ${metadata.analysis_date} · 📁 ${metadata.vault_path}`;
@@ -635,7 +834,7 @@
                 const diff = calcDifficulty(d);
 
                 return `
-                    <div class="domain-card" style="animation-delay: ${i * 0.05}s;">
+                    <div class="domain-card" style="animation-delay: ${i * 0.05}s;" data-domain-id="${d.domain_id}">
                         <div class="domain-header">
                             <div class="domain-name">${d.domain_name}</div>
                             <div class="domain-stats">
@@ -651,6 +850,13 @@
                     </div>
                 `;
             }).join('');
+
+            grid.querySelectorAll('.domain-card').forEach(card => {
+                card.addEventListener('click', () => {
+                    const domain = domainsById[card.dataset.domainId];
+                    if (domain) openTopicModal(domain);
+                });
+            });
         }
 
         function renderTechnologies(domains) {
@@ -677,6 +883,166 @@
             document.getElementById('techsList').innerHTML =
                 top.map(t => `<span class="tech-tag">${t}</span>`).join('');
         }
+
+        /* ═══════════ МОДАЛЬНОЕ ОКНО ТЕМ ДОМЕНА (макет C) ═══════════ */
+
+        let activeModalDomain = null;
+        let activeTopicId = null;
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str == null ? '' : String(str);
+            return div.innerHTML;
+        }
+
+        // taxonomy.json — результат LLM-анализа содержимого vault (потенциально
+        // недоверенных заметок третьих лиц); mastery_percent обязан быть числом
+        // 0-100 (data-model.md), но не валидируется на входе — без явного
+        // приведения типа он мог бы попасть в атрибут style как есть.
+        function safePercent(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return 0;
+            return Math.min(100, Math.max(0, Math.round(n)));
+        }
+
+        function openTopicModal(domain) {
+            activeModalDomain = domain;
+            const topics = Array.isArray(domain.topics) ? domain.topics : null;
+
+            document.getElementById('topicModalDomainName').textContent = domain.domain_name;
+            const overlay = document.getElementById('topicModalOverlay');
+            const listEl = document.getElementById('topicModalList');
+            const detailEl = document.getElementById('topicModalDetail');
+
+            if (topics === null) {
+                // FR-011 / contracts: поле topics отсутствует — старая таксономия без уровня тем
+                listEl.innerHTML = '';
+                detailEl.innerHTML = `
+                    <div class="topic-modal-empty-state">
+                        Детальный анализ тем для этого домена не построен.<br>
+                        Пересоберите таксономию (skill <code>semantic-taxonomy</code>), чтобы увидеть темы,
+                        проценты проработки и рекомендации.
+                    </div>`;
+            } else if (topics.length === 0) {
+                // Edge case: непустой домен без единой темы трактуется как ошибка анализа, не как "тем нет"
+                listEl.innerHTML = '';
+                detailEl.innerHTML = `
+                    <div class="topic-modal-empty-state">
+                        Анализ тем недоступен для этого домена (пустой результат анализа).<br>
+                        Попробуйте пересобрать таксономию ещё раз.
+                    </div>`;
+            } else {
+                renderTopicList(topics);
+                selectTopic(topics[0].topic_id);
+            }
+
+            overlay.hidden = false;
+        }
+
+        function closeTopicModal() {
+            document.getElementById('topicModalOverlay').hidden = true;
+            activeModalDomain = null;
+            activeTopicId = null;
+        }
+
+        function renderTopicList(topics) {
+            const listEl = document.getElementById('topicModalList');
+            listEl.innerHTML = topics.map(t => {
+                const pct = safePercent(t.mastery_percent);
+                const pctClass = pct < 30 ? 'low' : '';
+                return `
+                    <div class="topic-list-item" data-topic-id="${escapeHtml(t.topic_id)}">
+                        <span>${escapeHtml(t.topic_name)}</span>
+                        <span class="topic-list-pct ${pctClass}">${pct}%</span>
+                    </div>
+                `;
+            }).join('');
+
+            listEl.querySelectorAll('.topic-list-item').forEach(item => {
+                item.addEventListener('click', () => selectTopic(item.dataset.topicId));
+            });
+        }
+
+        function selectTopic(topicId) {
+            activeTopicId = topicId;
+            const topics = activeModalDomain.topics || [];
+            const topic = topics.find(t => t.topic_id === topicId);
+            if (!topic) return;
+
+            document.querySelectorAll('.topic-list-item').forEach(item => {
+                item.classList.toggle('active', item.dataset.topicId === topicId);
+            });
+
+            renderTopicDetail(topic);
+        }
+
+        function renderTopicDetail(topic) {
+            const detailEl = document.getElementById('topicModalDetail');
+            const notStudiedBadge = topic.has_notes === false
+                ? '<span class="topic-not-studied-badge">не изучено</span>'
+                : '';
+
+            detailEl.innerHTML = `
+                <div class="topic-detail-title">${escapeHtml(topic.topic_name)}${notStudiedBadge}</div>
+                <div class="topic-progress-bar">
+                    <div class="topic-progress-fill" style="width: ${safePercent(topic.mastery_percent)}%"></div>
+                </div>
+                <div class="topic-detail-summary">${escapeHtml(topic.summary)}</div>
+                ${topic.mastery_rationale
+                    ? `<div class="topic-detail-rationale">Обоснование: ${escapeHtml(topic.mastery_rationale)}</div>`
+                    : ''}
+                ${renderRecommendationsBlock(activeModalDomain.recommended_topics)}
+            `;
+        }
+
+        function renderRecommendationsBlock(recommendedTopics) {
+            const recs = Array.isArray(recommendedTopics) ? recommendedTopics.slice() : [];
+
+            if (recs.length === 0) {
+                return `
+                    <div class="topic-rec-block">
+                        <h3>Рекомендуется изучить</h3>
+                        <p class="topic-modal-empty-state" style="padding: 0.5rem 0; text-align: left;">
+                            Все выявленные темы этого домена проработаны на высоком уровне — новых рекомендаций нет.
+                        </p>
+                    </div>
+                `;
+            }
+
+            // Защитная сортировка на стороне UI — не полагаемся только на порядок с сервера
+            recs.sort((a, b) => safePercent(a.mastery_percent) - safePercent(b.mastery_percent));
+
+            const rows = recs.map(r => {
+                const crossBadge = r.is_cross_domain
+                    ? `<span class="topic-rec-cross">${escapeHtml(r.reason || '')}</span>`
+                    : '';
+                return `
+                    <div class="topic-rec-row">
+                        <span>${escapeHtml(r.topic_name)}${crossBadge}</span>
+                        <span>${safePercent(r.mastery_percent)}%${r.has_notes === false ? ' · не изучено' : ''}</span>
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="topic-rec-block">
+                    <h3>Рекомендуется изучить</h3>
+                    ${rows}
+                </div>
+            `;
+        }
+
+        document.getElementById('topicModalClose').addEventListener('click', closeTopicModal);
+
+        document.getElementById('topicModalOverlay').addEventListener('click', (e) => {
+            if (e.target.id === 'topicModalOverlay') closeTopicModal();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !document.getElementById('topicModalOverlay').hidden) {
+                closeTopicModal();
+            }
+        });
 
         window.addEventListener('DOMContentLoaded', loadDashboard);
     </script>

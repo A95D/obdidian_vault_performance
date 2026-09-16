@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "analysis_date": "2026-09-01",
+    "analysis_date": "2026-09-16",
     "vault_path": "demo/fake-vault",
     "total_files": 24,
     "total_domains": 4
@@ -23,7 +23,101 @@
         "beginner": { "files": ["f1", "f6"], "estimated_hours": 2 },
         "intermediate": { "files": ["f2", "f4"], "estimated_hours": 4 },
         "advanced": { "files": ["f3", "f5", "f7"], "estimated_hours": 7 }
-      }
+      },
+      "topics": [
+        {
+          "topic_id": "layered-architecture",
+          "topic_name": "Многослойная архитектура",
+          "summary": "Организация системы на слои (presentation, business, data) с чёткой разделением ответственности. Хорошо покрыты примеры интеграции и зависимостей между слоями.",
+          "mastery_percent": 72,
+          "mastery_rationale": "Overview и Components дают солидную основу, но отсутствуют антипаттерны (anemic layers, leaky abstractions).",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "API Gateway и маршрутизация",
+              "mastery_percent": 45,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Микросервисная архитектура",
+              "mastery_percent": 35,
+              "has_notes": false,
+              "is_cross_domain": true,
+              "reason": "требует Data Engineering подхода"
+            }
+          ]
+        },
+        {
+          "topic_id": "event-driven-design",
+          "topic_name": "Event-Driven архитектура",
+          "summary": "Проектирование систем на основе событий. Event Bus, асинхронная обработка, гарантии доставки. Два файла с примерами Kafka и async patterns.",
+          "mastery_percent": 68,
+          "mastery_rationale": "Event Bus Design хорошо разобран, но нет примеров обработки ошибок и деадлетtering.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Гарантии доставки и обработки",
+              "mastery_percent": 28,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Streaming Pipelines",
+              "mastery_percent": 52,
+              "has_notes": true,
+              "is_cross_domain": true,
+              "reason": "относится к Data Engineering"
+            }
+          ]
+        },
+        {
+          "topic_id": "scalability",
+          "topic_name": "Масштабируемость и производительность",
+          "summary": "Стратегии масштабирования, балансировка нагрузки, горизонтальное и вертикальное расширение, кэширование. Kubernetes-focused примеры.",
+          "mastery_percent": 65,
+          "mastery_rationale": "Scaling Strategies дают хороший обзор, но отсутствуют метрики и мониторинг производительности.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Кэширование и CDN",
+              "mastery_percent": 22,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Database Sharding",
+              "mastery_percent": 18,
+              "has_notes": false,
+              "is_cross_domain": true,
+              "reason": "требует знаний из Data Engineering"
+            }
+          ]
+        },
+        {
+          "topic_id": "security-patterns",
+          "topic_name": "Безопасность архитектуры",
+          "summary": "OAuth2, JWT, RBAC, шифрование, управление секретами. Security Model file и примеры в API Gateway.",
+          "mastery_percent": 54,
+          "mastery_rationale": "OAuth2 документирован, но отсутствуют примеры RBAC реализации и управления ключами.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Zero Trust архитектура",
+              "mastery_percent": 15,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Compliance и Audit",
+              "mastery_percent": 10,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        }
+      ],
+      "recommended_topics": []
     },
     {
       "domain_id": "data-engineering",
@@ -41,7 +135,109 @@
         "beginner": { "files": ["f8"], "estimated_hours": 1.5 },
         "intermediate": { "files": ["f9", "f10", "f11"], "estimated_hours": 5 },
         "advanced": { "files": ["f12", "f13"], "estimated_hours": 6 }
-      }
+      },
+      "topics": [
+        {
+          "topic_id": "etl-fundamentals",
+          "topic_name": "ETL и ELT основы",
+          "summary": "Базовые паттерны извлечения, трансформации и загрузки данных. Extract, Transform, Load цикл, инструменты Python и SQL.",
+          "mastery_percent": 78,
+          "mastery_rationale": "ETL Basics хорошо описан, примеры рабочие, но нет обсуждения error handling и retry logic.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Incremental loading и Change Data Capture",
+              "mastery_percent": 35,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Data Validation Framework",
+              "mastery_percent": 48,
+              "has_notes": true,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "dbt-modeling",
+          "topic_name": "dbt моделирование и трансформация",
+          "summary": "dbt (data build tool) для управления трансформациями SQL. Слои staging, intermediate, marts. Тесты и документация моделей.",
+          "mastery_percent": 81,
+          "mastery_rationale": "dbt Models file разбирает лучшие практики слоёв и зависимостей. Хватает для среднего уровня.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "dbt Macros и Custom Tests",
+              "mastery_percent": 42,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "dbt Package Ecosystem",
+              "mastery_percent": 25,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "orchestration",
+          "topic_name": "Оркестрация pipelines (Airflow)",
+          "summary": "Apache Airflow для планирования и мониторинга DAG (directed acyclic graphs). Задачи, зависимости, XCom, sensors.",
+          "mastery_percent": 62,
+          "mastery_rationale": "Airflow DAGs разбирает основные операторы, но отсутствуют продвинутые темы: SLA, alerting, custom operators.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Airflow SLA и backfill",
+              "mastery_percent": 28,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Orchestration alternatives (Prefect, Dagster)",
+              "mastery_percent": 15,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "data-quality",
+          "topic_name": "Качество данных и валидация",
+          "summary": "Стратегии проверки качества, анómалии, мониторинг данных, тесты в dbt и Python. Data Quality Checks файл.",
+          "mastery_percent": 71,
+          "mastery_rationale": "Data Quality Checks хорошо покрыты базовые сценарии (NULL checks, range validation), но нет статистических аномалий.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Anomaly Detection и Outliers",
+              "mastery_percent": 31,
+              "has_notes": true,
+              "is_cross_domain": true,
+              "reason": "требует ML методов"
+            }
+          ]
+        },
+        {
+          "topic_id": "streaming-pipelines",
+          "topic_name": "Streaming данные и real-time",
+          "summary": "Kafka, streaming архитектура, windowing, stateful processing. Отличие от batch pipelines.",
+          "mastery_percent": 58,
+          "mastery_rationale": "Streaming Pipelines даёт хороший обзор Kafka, но примеры обработки состояния минимальны.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Stream Processing (Flink, Spark Streaming)",
+              "mastery_percent": 22,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        }
+      ],
+      "recommended_topics": []
     },
     {
       "domain_id": "methodology",
@@ -58,7 +254,92 @@
         "beginner": { "files": ["f14", "f15"], "estimated_hours": 1 },
         "intermediate": { "files": ["f16", "f17"], "estimated_hours": 3 },
         "advanced": { "files": ["f18"], "estimated_hours": 2 }
-      }
+      },
+      "topics": [
+        {
+          "topic_id": "code-review-process",
+          "topic_name": "Code Review процесс",
+          "summary": "Checklist для CR, как давать feedback, критерии одобрения. Best practices в Code Review Guide.",
+          "mastery_percent": 74,
+          "mastery_rationale": "Code Review Guide детально разбирает критерии и процесс, хотя примеров неудачных reviews нет.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Asynchronous review и communication",
+              "mastery_percent": 42,
+              "has_notes": true,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "testing-pyramid",
+          "topic_name": "Стратегия тестирования (пирамида)",
+          "summary": "Unit, integration, e2e тесты. Баланс между speed и coverage. Testing Strategy file с примерами pytest.",
+          "mastery_percent": 68,
+          "mastery_rationale": "Тестовая пирамида объяснена хорошо, но отсутствуют примеры flaky tests и strategies борьбы с ними.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Test-Driven Development (TDD)",
+              "mastery_percent": 31,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Mutation testing и coverage tools",
+              "mastery_percent": 19,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "release-management",
+          "topic_name": "Release и версионирование",
+          "summary": "Semantic versioning, release checklist, changelogs, deployment стратегии. Blue-green, canary deployments.",
+          "mastery_percent": 59,
+          "mastery_rationale": "Release Process хорошо структурирован, но отсутствуют примеры rollback стратегий и incident response во время деплоя.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "CD/CI pipeline и automation",
+              "mastery_percent": 47,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Feature flags и A/B тестирование",
+              "mastery_percent": 23,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "incident-response",
+          "topic_name": "Incident Response и post-mortems",
+          "summary": "Как реагировать на production issues. Root cause analysis, blameless post-mortems, lessons learned.",
+          "mastery_percent": 51,
+          "mastery_rationale": "Incident Response file даёт методологию, но примеров реальных incidents и lessons learned нет.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "On-call practices и alerting",
+              "mastery_percent": 38,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Observability (logging, metrics, traces)",
+              "mastery_percent": 44,
+              "has_notes": true,
+              "is_cross_domain": false
+            }
+          ]
+        }
+      ],
+      "recommended_topics": []
     },
     {
       "domain_id": "ml-notes",
@@ -76,7 +357,131 @@
         "beginner": { "files": ["f19"], "estimated_hours": 1.5 },
         "intermediate": { "files": ["f20", "f21", "f24"], "estimated_hours": 5 },
         "advanced": { "files": ["f22", "f23"], "estimated_hours": 6 }
-      }
+      },
+      "topics": [
+        {
+          "topic_id": "ml-fundamentals",
+          "topic_name": "ML основы и алгоритмы",
+          "summary": "Supervised vs unsupervised, классификация vs регрессия. Базовые алгоритмы: linear regression, decision trees, clustering.",
+          "mastery_percent": 62,
+          "mastery_rationale": "ML Fundamentals file хорошо введение в тему, но отсутствуют примеры с реальными datasets.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Neural Networks и Deep Learning",
+              "mastery_percent": 28,
+              "has_notes": false,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Ensemble Methods",
+              "mastery_percent": 35,
+              "has_notes": true,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "feature-engineering",
+          "topic_name": "Feature Engineering и preprocessing",
+          "summary": "Выбор признаков, нормализация, encoding categorical, handling missing values. Feature importance.",
+          "mastery_percent": 71,
+          "mastery_rationale": "Feature Engineering file детально разбирает pipeline обработки, хороший набор примеров.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Feature Selection algorithms",
+              "mastery_percent": 42,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Domain-specific feature extraction",
+              "mastery_percent": 19,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "model-evaluation",
+          "topic_name": "Оценка и валидация моделей",
+          "summary": "Metrics: accuracy, precision, recall, F1, AUC-ROC. Cross-validation, train/test split. Overfitting vs underfitting.",
+          "mastery_percent": 75,
+          "mastery_rationale": "Model Evaluation file очень хорошо структурирован, примеры с confusion matrix и ROC curves.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Imbalanced datasets и stratification",
+              "mastery_percent": 48,
+              "has_notes": true,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "embeddings",
+          "topic_name": "Embeddings и представления (vectors)",
+          "summary": "Word embeddings, sentence embeddings, representation learning. Dense vector spaces, similarity metrics.",
+          "mastery_percent": 64,
+          "mastery_rationale": "Embeddings Deep Dive даёт хороший обзор word2vec и transformer embeddings, примеры на transformers.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Vector databases и retrieval",
+              "mastery_percent": 33,
+              "has_notes": false,
+              "is_cross_domain": true,
+              "reason": "требует Data Engineering подхода"
+            },
+            {
+              "topic_name": "Fine-tuning embeddings",
+              "mastery_percent": 29,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "model-serving",
+          "topic_name": "Model Serving и deployment",
+          "summary": "Как выкатить модель в production. REST API, batch inference, real-time serving. Model versioning и A/B тесты.",
+          "mastery_percent": 57,
+          "mastery_rationale": "Model Serving file разбирает Docker и Kubernetes deployment, но примеры minimal, без обсуждения latency.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "Model monitoring и drift detection",
+              "mastery_percent": 38,
+              "has_notes": true,
+              "is_cross_domain": false
+            },
+            {
+              "topic_name": "Edge deployment и quantization",
+              "mastery_percent": 12,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        },
+        {
+          "topic_id": "experiment-tracking",
+          "topic_name": "Experiment Tracking и reproducibility",
+          "summary": "MLflow, Weights & Biases, Neptune. Tracking hyperparameters, metrics, artifacts. Reproducibility best practices.",
+          "mastery_percent": 68,
+          "mastery_rationale": "Experiment Tracking file хорошо разбирает инструменты, но отсутствует обсуждение collaboration и governance.",
+          "has_notes": true,
+          "recommended_topics": [
+            {
+              "topic_name": "ML governance и versioning",
+              "mastery_percent": 24,
+              "has_notes": false,
+              "is_cross_domain": false
+            }
+          ]
+        }
+      ],
+      "recommended_topics": []
     }
   ]
 }

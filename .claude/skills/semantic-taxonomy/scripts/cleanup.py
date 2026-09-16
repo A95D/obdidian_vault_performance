@@ -9,6 +9,7 @@
 
 import sys
 import io
+import shutil
 from pathlib import Path
 
 # Установить UTF-8 кодировку для вывода (защита от ошибок на Windows)
@@ -30,16 +31,25 @@ def partial_cleanup(project_root):
 
     deleted_files = []
 
-    # Удалить все файлы в temp_files кроме финальных артефактов
+    # Удалить все файлы и поддиректории в temp_files кроме финальных артефактов
+    # (поддиректории — например .claude/temp_files/mockups/ с макетами из
+    # /speckit-implement — не удалялись бы iterdir()-циклом по файлам, см.
+    # правило CLAUDE.md "временные файлы живут в .claude/temp_files/, чистятся cleanup.py")
     if temp_dir.exists():
         try:
-            for file_path in temp_dir.iterdir():
-                if file_path.is_file() and file_path.name not in final_artifacts:
+            for entry_path in temp_dir.iterdir():
+                if entry_path.is_dir():
                     try:
-                        file_path.unlink()
-                        deleted_files.append(f".claude/temp_files/{file_path.name}")
+                        shutil.rmtree(entry_path)
+                        deleted_files.append(f".claude/temp_files/{entry_path.name}/")
                     except Exception as e:
-                        print(f"Не удалось удалить {file_path.name}: {e}", file=sys.stderr)
+                        print(f"Не удалось удалить директорию {entry_path.name}: {e}", file=sys.stderr)
+                elif entry_path.is_file() and entry_path.name not in final_artifacts:
+                    try:
+                        entry_path.unlink()
+                        deleted_files.append(f".claude/temp_files/{entry_path.name}")
+                    except Exception as e:
+                        print(f"Не удалось удалить {entry_path.name}: {e}", file=sys.stderr)
         except Exception as e:
             print(f"Не удалось просканировать temp_files: {e}", file=sys.stderr)
 
@@ -61,16 +71,22 @@ def full_cleanup(project_root):
     temp_dir = project_root / ".claude" / "temp_files"
     deleted_files = []
 
-    # Удалить всё в temp_files
+    # Удалить всё в temp_files, включая поддиректории (например mockups/)
     if temp_dir.exists():
         try:
-            for file_path in temp_dir.iterdir():
-                if file_path.is_file():
+            for entry_path in temp_dir.iterdir():
+                if entry_path.is_dir():
                     try:
-                        file_path.unlink()
-                        deleted_files.append(f".claude/temp_files/{file_path.name}")
+                        shutil.rmtree(entry_path)
+                        deleted_files.append(f".claude/temp_files/{entry_path.name}/")
                     except Exception as e:
-                        print(f"Не удалось удалить {file_path.name}: {e}", file=sys.stderr)
+                        print(f"Не удалось удалить директорию {entry_path.name}: {e}", file=sys.stderr)
+                elif entry_path.is_file():
+                    try:
+                        entry_path.unlink()
+                        deleted_files.append(f".claude/temp_files/{entry_path.name}")
+                    except Exception as e:
+                        print(f"Не удалось удалить {entry_path.name}: {e}", file=sys.stderr)
         except Exception as e:
             print(f"⚠️  Не удалось просканировать temp_files: {e}", file=sys.stderr)
 

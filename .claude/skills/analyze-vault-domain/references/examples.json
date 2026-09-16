@@ -114,7 +114,29 @@
               "advanced": 1
             }
           },
-          "dependencies_overview": "overview.md → components.md → patterns.md (цепочка от базового к продвинутому)"
+          "dependencies_overview": "overview.md → components.md → patterns.md (цепочка от базового к продвинутому)",
+          "topics": [
+            {
+              "topic_id": "layered-architecture",
+              "topic_name": "Многослойная архитектура",
+              "summary": "Хорошо покрыты принципы разделения на слои и компонентный подход, есть примеры интерфейсов и DI.",
+              "mastery_percent": 68,
+              "mastery_rationale": "Заметки разбирают контракты и изоляцию слоёв на практических примерах, но нет разбора антипаттернов (anemic layers, leaky abstractions).",
+              "has_notes": true,
+              "note_paths": ["docs/architecture/overview.md", "docs/architecture/components.md"],
+              "related_domain_topics": []
+            },
+            {
+              "topic_id": "architecture-fitness-functions",
+              "topic_name": "Fitness functions и архитектурные метрики",
+              "summary": "Тема не представлена в заметках домена — нет материала о том, как объективно проверять соответствие архитектуры целевым качествам.",
+              "mastery_percent": 5,
+              "mastery_rationale": "Ни один файл домена не упоминает автоматизированную проверку архитектурных ограничений — для senior-уровня это стандартная часть темы, но её нет.",
+              "has_notes": false,
+              "note_paths": [],
+              "related_domain_topics": []
+            }
+          ]
         }
       }
     },
@@ -194,7 +216,19 @@
               "advanced": 1
             }
           },
-          "dependencies_overview": "fundamentals.md → advanced-ideas.md"
+          "dependencies_overview": "fundamentals.md → advanced-ideas.md",
+          "topics": [
+            {
+              "topic_id": "core-terminology",
+              "topic_name": "Базовая терминология",
+              "summary": "Основные термины и определения системы разобраны последовательно.",
+              "mastery_percent": 55,
+              "mastery_rationale": "Термины введены корректно, но нет примеров применения в реальных задачах.",
+              "has_notes": true,
+              "note_paths": ["docs/concepts/fundamentals.md"],
+              "related_domain_topics": []
+            }
+          ]
         }
       }
     },
@@ -286,7 +320,19 @@
               "intermediate": 1
             }
           },
-          "dependencies_overview": "overview.md → [processes.md (не обработан), checklist.md]"
+          "dependencies_overview": "overview.md → [processes.md (не обработан), checklist.md]",
+          "topics": [
+            {
+              "topic_id": "development-process",
+              "topic_name": "Процесс разработки",
+              "summary": "Есть обзор методологии и чек-лист этапов; часть материала (processes.md) не прочитана из-за повреждения файла.",
+              "mastery_percent": 30,
+              "mastery_rationale": "Доступные заметки дают только верхнеуровневое понимание процесса, детальный разбор недоступен из-за повреждённого файла.",
+              "has_notes": true,
+              "note_paths": ["docs/methodology/overview.md", "docs/methodology/checklist.md"],
+              "related_domain_topics": []
+            }
+          ]
         }
       }
     }

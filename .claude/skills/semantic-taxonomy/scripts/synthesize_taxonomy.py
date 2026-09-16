@@ -9,10 +9,20 @@
 """
 
 import json
+import re
 import sys
 import io
 from pathlib import Path
 from datetime import datetime
+
+# Порог "проработки" темы, ниже которого тема попадает в рекомендации (FR-009)
+RECOMMENDATION_MASTERY_THRESHOLD = 50
+
+# Игнорируемые при сопоставлении тем короткие/служебные слова
+TOPIC_NAME_STOPWORDS = {
+    "и", "в", "на", "с", "для", "по", "из", "как", "или", "не",
+    "the", "of", "in", "for", "to", "and", "or", "an", "a",
+}
 
 # Установить UTF-8 кодировку для вывода (защита от ошибок на Windows)
 if sys.stdout.encoding != 'utf-8':
@@ -215,10 +225,184 @@ def build_learning_paths(domain_files: list) -> dict:
     }
 
 
+CYRILLIC_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(text: str) -> str:
+    """Транслитерировать и привести строку к slug формату (kebab-case)."""
+    if not text:
+        return ""
+    text = text.lower()
+    text = "".join(CYRILLIC_TRANSLIT.get(ch, ch) for ch in text)
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text
+
+
+def normalize_topic(topic: dict, used_ids: set) -> dict:
+    """
+    Нормализовать один объект темы к текущей схеме REFERENCE.md
+    (см. feedback: старые анализы доменов используют "name"/"topic" вместо
+    "topic_name" и "description" вместо "summary", без topic_id).
+    """
+    if not isinstance(topic, dict):
+        return topic
+
+    if not topic.get("topic_name"):
+        topic["topic_name"] = topic.get("name") or topic.get("topic") or ""
+
+    if not topic.get("summary"):
+        topic["summary"] = topic.get("description", "") or ""
+
+    if not topic.get("topic_id"):
+        base_id = slugify(topic["topic_name"]) or "topic"
+        topic_id = base_id
+        suffix = 2
+        while topic_id in used_ids:
+            topic_id = f"{base_id}-{suffix}"
+            suffix += 1
+        topic["topic_id"] = topic_id
+    used_ids.add(topic["topic_id"])
+
+    topic.setdefault("mastery_percent", 0)
+    topic.setdefault("mastery_rationale", "")
+    topic.setdefault("has_notes", bool(topic.get("note_paths")))
+    topic.setdefault("note_paths", [])
+    topic.setdefault("related_domain_topics", [])
+
+    return topic
+
+
+def get_domain_topics(domain_data: dict) -> list:
+    """Достать topics[] из domain_summary анализа домена (устойчиво к отсутствию поля)."""
+    if not isinstance(domain_data, dict):
+        return []
+    domain_summary = domain_data.get("domain_summary")
+    if not isinstance(domain_summary, dict):
+        return []
+    topics = domain_summary.get("topics")
+    if not isinstance(topics, list):
+        return []
+    used_ids = {t["topic_id"] for t in topics if isinstance(t, dict) and t.get("topic_id")}
+    return [normalize_topic(t, used_ids) for t in topics]
+
+
+def tokenize_topic_name(name: str) -> set:
+    """
+    Токенизировать название темы для грубого сопоставления смежных тем между
+    доменами. Используются 6-символьные префиксы слов, а не сами слова —
+    без этого русские словоформы ("кэширование" / "кэширования") никогда не
+    совпадут при точном сравнении. Это эвристика, а не морфологический анализ
+    (без новых зависимостей, см. research.md п.4/п.6) — возможны как ложные
+    срабатывания на разных словах с общим префиксом, так и пропуски на словах
+    с непохожими префиксами при синонимах.
+    """
+    if not name:
+        return set()
+    words = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", name.lower())
+    return {w[:6] for w in words if len(w) > 3 and w not in TOPIC_NAME_STOPWORDS}
+
+
+def compute_related_domain_topics(analysis_data: dict) -> None:
+    """
+    Сопоставить темы разных доменов по пересечению ключевых слов в topic_name
+    и заполнить `related_domain_topics` каждой темы (мутирует topics in-place).
+
+    Выполняется в Python, а не агентом: все домены Фазы 2 анализируются
+    параллельно одним сообщением, поэтому агент одного домена не видит темы
+    других доменов (см. research.md п.4).
+    """
+    indexed_topics = []
+    for domain_id, domain_data in analysis_data.items():
+        for topic in get_domain_topics(domain_data):
+            if isinstance(topic, dict) and topic.get("topic_name") and topic.get("topic_id"):
+                indexed_topics.append((domain_id, topic, tokenize_topic_name(topic["topic_name"])))
+
+    for domain_id, topic, tokens in indexed_topics:
+        related = []
+        if tokens:
+            for other_domain_id, other_topic, other_tokens in indexed_topics:
+                if other_domain_id == domain_id:
+                    continue
+                if tokens & other_tokens:
+                    ref = f"{other_domain_id}:{other_topic['topic_id']}"
+                    if ref not in related:
+                        related.append(ref)
+        topic["related_domain_topics"] = related
+
+
+def compute_recommended_topics(domain_id: str, topics: list, analysis_data: dict) -> list:
+    """
+    Построить отсортированный список рекомендаций для домена: сначала темы
+    самого домена с has_notes=false или низким mastery_percent, затем смежные
+    темы других доменов (через related_domain_topics), тоже неизученные/слабо
+    проработанные (FR-009, FR-010; data-model.md -> RecommendedTopic).
+    """
+    recommendations = []
+
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        mastery_percent = topic.get("mastery_percent", 0)
+        has_notes = topic.get("has_notes", True)
+        if not has_notes or mastery_percent < RECOMMENDATION_MASTERY_THRESHOLD:
+            recommendations.append({
+                "domain_id": domain_id,
+                "topic_id": topic.get("topic_id"),
+                "topic_name": topic.get("topic_name"),
+                "mastery_percent": mastery_percent,
+                "is_cross_domain": False,
+                "reason": "не изучено" if not has_notes else "низкая проработка относительно уровня эксперта",
+            })
+
+    seen_cross_domain = set()
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        for ref in topic.get("related_domain_topics", []) or []:
+            if ":" not in ref:
+                continue
+            other_domain_id, other_topic_id = ref.split(":", 1)
+            other_domain_data = analysis_data.get(other_domain_id)
+            if not other_domain_data:
+                continue
+            for other_topic in get_domain_topics(other_domain_data):
+                if not isinstance(other_topic, dict) or other_topic.get("topic_id") != other_topic_id:
+                    continue
+                other_mastery = other_topic.get("mastery_percent", 0)
+                other_has_notes = other_topic.get("has_notes", True)
+                if other_has_notes and other_mastery >= RECOMMENDATION_MASTERY_THRESHOLD:
+                    continue
+                cross_key = (other_domain_id, other_topic_id)
+                if cross_key in seen_cross_domain:
+                    continue
+                seen_cross_domain.add(cross_key)
+                recommendations.append({
+                    "domain_id": other_domain_id,
+                    "topic_id": other_topic_id,
+                    "topic_name": other_topic.get("topic_name"),
+                    "mastery_percent": other_mastery,
+                    "is_cross_domain": True,
+                    "reason": f"смежно с «{topic.get('topic_name')}»",
+                })
+
+    recommendations.sort(key=lambda r: r.get("mastery_percent", 0))
+    return recommendations
+
+
 def generate_taxonomy_json(analysis_data: dict, metadata: dict) -> dict:
     """Генерировать финальную таксономию."""
 
     global_facets = extract_global_facets(analysis_data)
+
+    # Сопоставить смежные темы между доменами до построения объектов доменов
+    # (мутирует topics внутри analysis_data in-place — см. research.md п.4)
+    compute_related_domain_topics(analysis_data)
 
     domains = []
     total_files = 0
@@ -236,6 +420,8 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict) -> dict:
             if isinstance(file_info, dict) and file_info.get("paradigm"):
                 paradigms_set.add(file_info["paradigm"])
 
+        domain_topics = get_domain_topics(domain_data)
+
         domain_obj = {
             "domain_id": domain_key,
             "domain_name": domain_data.get("domain_name", domain_key.title()),
@@ -243,7 +429,9 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict) -> dict:
             "file_count": len(files_in_domain),
             "paradigms": sorted(list(paradigms_set)),
             "files": files_in_domain,
-            "learning_paths": build_learning_paths(files_in_domain)
+            "learning_paths": build_learning_paths(files_in_domain),
+            "topics": domain_topics,
+            "recommended_topics": compute_recommended_topics(domain_key, domain_topics, analysis_data)
         }
         domains.append(domain_obj)
 
@@ -296,7 +484,8 @@ def verify_taxonomy(taxonomy: dict) -> dict:
         "total_files_count": "OK",
         "domains_consistency": "OK",
         "no_orphaned_files": "OK",
-        "required_fields": "OK"
+        "required_fields": "OK",
+        "topic_required_fields": "OK"
     }
 
     total_files = taxonomy["metadata"]["total_files"]
@@ -320,6 +509,20 @@ def verify_taxonomy(taxonomy: dict) -> dict:
 
     if missing_title > 0:
         checks["title_completeness"] = f"INFO: {missing_title} files have null title (partial analysis)"
+
+    # Проверить обязательные поля в темах доменов (data-model.md -> Topic; см. регрессию schema drift)
+    bad_topics = 0
+    for domain in taxonomy["domains"]:
+        for topic in domain.get("topics", []):
+            if not isinstance(topic, dict):
+                bad_topics += 1
+                continue
+            required_topic_fields = ["topic_id", "topic_name", "summary"]
+            if not all(topic.get(field) for field in required_topic_fields):
+                bad_topics += 1
+
+    if bad_topics > 0:
+        checks["topic_required_fields"] = f"WARN: {bad_topics} topics missing topic_id/topic_name/summary"
 
     return checks
 
@@ -391,23 +594,29 @@ def main():
             for domain in existing_taxonomy.get("domains", []):
                 domain_id = domain["domain_id"]
                 existing_files = domain.get("files", [])
+                # Темы из предыдущей сборки (уже в финальном формате taxonomy.json)
+                existing_topics = domain.get("topics", [])
 
                 # Если новый анализ есть для этого домена, мёржим
                 if domain_id in analysis_data:
                     new_files = analysis_data[domain_id].get("files", [])
                     merged_files = merge_domain_files(existing_files, new_files)
+                    new_topics = get_domain_topics(analysis_data[domain_id])
                     merged_analysis[domain_id] = {
                         "files": merged_files,
                         "domain_name": domain.get("domain_name", domain_id),
-                        "description": domain.get("description", "")
+                        "description": domain.get("description", ""),
+                        # Новый анализ домена полностью переопределяет темы (пересчитаны заново)
+                        "domain_summary": {"topics": new_topics if new_topics else existing_topics}
                     }
                     print(f"  - {domain_id}: {len(existing_files)} -> {len(merged_files)} файлов", file=sys.stderr)
                 else:
-                    # Сохраняем домен как есть
+                    # Сохраняем домен как есть, включая ранее построенные темы
                     merged_analysis[domain_id] = {
                         "files": existing_files,
                         "domain_name": domain.get("domain_name", domain_id),
-                        "description": domain.get("description", "")
+                        "description": domain.get("description", ""),
+                        "domain_summary": {"topics": existing_topics}
                     }
 
             # Добавляем новые домены если их не было
