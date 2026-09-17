@@ -36,6 +36,8 @@ obdidian_vault_performance/
 |---|---|
 | Логика анализа одного домена vault | `.claude/agents/vault-domain-analyzer.md` |
 | Оркестрация построения таксономии | `.claude/skills/semantic-taxonomy/` |
+| Классификация тем батча (Фаза 0) | `.claude/agents/vault-topic-classifier.md` |
+| Фильтр мусорных файлов (шаблоны, пустые заметки) | `prepare_clustering_batches.py` (эвристика) + `cluster_from_topics.py` (`noise_files`) |
 | Схема и примеры анализа домена | `.claude/skills/analyze-vault-domain/references/` |
 | Логика миграции vault | `.claude/skills/vault-migration/` |
 | Путь к реальному vault пользователя | `.env` (`VAULT_PATH`) |
@@ -55,6 +57,11 @@ Python (python-dotenv, pyyaml), локальный HTTP-сервер (`python -m
 4. `.env` не читать целиком. Для проверки переменной - `grep "^VAR=" .env`.
 5. Не выводить сырой JSON анализа в чат - только обработанное summary.
 6. Временные файлы анализа живут в `.claude/temp_files/`, чистятся `cleanup.py`.
+7. Мусорные файлы (шаблоны, вложения, пустые заметки) отсеиваются до Фазы 2
+   двумя ступенями (эвристика без LLM + сигнал `vault-topic-classifier`) и
+   никогда не анализируются доменами. Список отсеянного - в секции
+   `filtered_out` итогового `taxonomy.json`, проверять её при подозрении,
+   что фильтр отсёк что-то ценное.
 
 ## Большая фича = план в `.claude/plans/`
 

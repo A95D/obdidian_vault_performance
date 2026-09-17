@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 .claude/temp_files/
+.claude/retrospectives/

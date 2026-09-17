@@ -55,7 +55,7 @@ description: |
 
 ## Подготовка: Окружение
 
-Переменная `VAULT_PATH` должна быть установлена в `.env`:
+Переменные должны быть установлены в `.env`:
 
 ```env
 VAULT_PATH=<путь-к-vault>
@@ -63,15 +63,23 @@ VAULT_PATH=<путь-к-vault>
 
 Проверка:
 ```bash
-type .env  # Windows
-cat .env   # Linux/Mac
+grep "^VAULT_PATH=" .env
 ```
+
+Семантический анализ содержимого файлов (Фаза 0) выполняется субагентом
+`vault-topic-classifier` через Agent tool внутри текущей сессии — отдельный
+LLM API-ключ для этого не требуется.
 
 ---
 
-## Поток выполнения (6 фаз)
+## Поток выполнения (7 фаз)
 
 ```
+Фаза 0 (Semantic Clustering)
+    ├─ 0.1 prepare_clustering_batches.py [Python]  clustering-batches.json
+    ├─ 0.2 vault-topic-classifier × N   [Agent tool, параллельно]  batch-*-topics.json
+    └─ 0.3 cluster_from_topics.py       [Python]   vault-clusters.json
+    ↓
 Фаза 1 (Ingest)       [Python]           vault-structure-analysis.json
     ↓
 Фаза 2 (Deep Read)    [Agent tool]       *-analysis.json (по доменам)
@@ -84,10 +92,21 @@ cat .env   # Linux/Mac
 cleanup.py (удаляет промежуточные файлы)
 ```
 
+Домены (Фаза 1) определяются по содержимому файлов (Фаза 0), а не по
+структуре папок: `collect_vault_structure.py` читает `vault-clusters.json`,
+если он существует, и берёт домен файла оттуда. Если Фаза 0 не запускалась —
+работает прежний folder-based fallback (домен = первый сегмент пути). Файлы
+из `noise_files` (Фаза 0) полностью исключаются из `vault-structure-analysis.json`
+и попадают в отдельную секцию `filtered_out` итоговой `taxonomy.json` — ни в
+один домен, включая folder-based fallback, они не попадают.
+
 ### Таблица фаз
 
 | Фаза | Инструмент | Выходной файл | Сохран. |
 |------|-----------|---|---|
+| 0.1 Batching | Python | clustering-batches.json | Временный |
+| 0.2 Topic Classify | Agent tool | batch-{id}-topics.json | Временный |
+| 0.3 Clustering | Python | vault-clusters.json | Временный |
 | 1. Ingest | Python | vault-structure-analysis.json | Временный |
 | 2. Deep Read | Agent tool | {domain}-analysis.json | Временный |
 | 3. Synthesis | Python (в памяти) | — | — |
@@ -95,6 +114,110 @@ cleanup.py (удаляет промежуточные файлы)
 | 6. Validation & Cleanup | Python | — | — |
 
 **Финальные артефакты**: `.claude/temp_files/taxonomy.json`
+
+---
+
+## Фаза 0: Семантическая кластеризация содержимого
+
+Три шага: скрипт (подготовка) → субагенты (классификация, параллельно) →
+скрипт (слияние и кластеризация). Семантический анализ содержимого — это
+всегда работа субагента `vault-topic-classifier` через Agent tool, никогда
+не прямой API-вызов из скрипта.
+
+### Шаг 0.1: Подготовка батчей
+
+```bash
+python .claude/skills/semantic-taxonomy/scripts/prepare_clustering_batches.py
+```
+
+Сканирует все `.md` файлы vault'а и сначала прогоняет их через дешёвый
+эвристический пре-фильтр шума (без LLM): файлы из служебных папок
+(`templates/`, `attachments/`, `.trash/` и т.п.), пустые заметки и файлы
+только с frontmatter отсеиваются сразу и в батчи на классификацию не
+попадают — они уже мусор, незачем тратить на них Фазу 0.2 и Фазу 2. Затем
+для оставшихся файлов сверяется content-hash с `semantic-analysis-cache.json`
+— файлы с неизменившимся хешем в батчи тоже не попадают (экономия — не идут
+на повторную классификацию). Новые/изменившиеся файлы группируются в батчи
+по 15 файлов.
+
+Выход: `.claude/temp_files/clustering-batches.json` — поля `batches`,
+`cached_files`, `cached_file_count`, `prefiltered_files`,
+`prefiltered_count`, `files_to_analyze`, `total_files`.
+
+Если `files_to_analyze == 0` — все файлы уже в кеше, шаг 0.2 пропускается,
+сразу переходи к шагу 0.3.
+
+### Шаг 0.2: Классификация тем (Agent tool)
+
+### ⚠️ КРИТИЧЕСКИ ВАЖНО: способ вызова
+
+- **ОБЯЗАТЕЛЬНО**: используй инструмент **Agent** с `subagent_type: "vault-topic-classifier"`
+- **ОБЯЗАТЕЛЬНО**: все вызовы для всех батчей — **одним сообщением**
+  (несколько tool_use блоков параллельно), как в Фазе 2 для
+  `vault-domain-analyzer`. Последовательные вызовы недопустимы.
+- **После отправки**: в основной чат попадает только короткая 3-строчная
+  сводка на батч — никакого JSON, никаких Read/Write в диалог.
+
+**ЗАПРЕЩЕНО**: самому читать файлы vault'а или писать `batch-*-topics.json`
+в основном потоке (orchestrator). Это задача только субагента
+`vault-topic-classifier`.
+
+Как выполнять:
+
+1. Прочитать `clustering-batches.json` — список батчей
+2. Для каждого батча запустить Agent tool (в одном сообщении параллельно):
+
+```python
+for batch in batches:
+    Agent({
+        description: f"Классификация тем: {batch['batch_id']}",
+        subagent_type: "vault-topic-classifier",
+        prompt: f"""
+        batch_id: "{batch['batch_id']}"
+        files: {batch['files']}
+        """
+    })
+```
+
+3. Ожидать завершения всех субагентов — каждый запишет свой
+   `batch-{batch_id}-topics.json`
+
+### Шаг 0.3: Слияние и кластеризация
+
+```bash
+python .claude/skills/semantic-taxonomy/scripts/cluster_from_topics.py
+```
+
+Читает `clustering-batches.json` + все `batch-*-topics.json` + кеш,
+обновляет кеш новыми результатами, строит кластеры по primary_topic
+(multi-topic файлы с низкой уверенностью пытаются присоединиться по
+пересечению secondary_topics). Файлы с confidence_score ниже порога (0.5)
+или без семантического совпадения попадают в `unclassified_files` — это
+темы, которым не нашлось пары, но не мусор: такие файлы всё равно получат
+домен через folder-based fallback в Фазе 1.
+
+Отдельно собирается `noise_files` — объединение файлов, отсеянных
+эвристикой на шаге 0.1 (`prefiltered_files`), и файлов, которые сам
+классификатор пометил как `read_error`/`empty_or_too_short` в поле
+`skipped`. Это и есть настоящий мусор: в отличие от `unclassified_files`,
+файлы из `noise_files` в Фазе 1 полностью исключаются из
+`vault-structure-analysis.json` и никогда не получают домен ни
+семантически, ни через folder-based fallback.
+
+Выход: `.claude/temp_files/vault-clusters.json` — с полями
+`unclassified_files` и `noise_files` как раздельными категориями.
+
+### Проверка
+
+> Чеклист ниже — для внутренней проверки перед переходом к следующей фазе.
+> В диалог выводить не построчный чеклист, а одну итоговую строку по фазе
+> (например: "Фаза 0: семантическая кластеризация — ок").
+
+- [ ] Файл `.claude/temp_files/vault-clusters.json` создан
+- [ ] `statistics.total_files` совпадает с количеством .md файлов в vault
+- [ ] `statistics.clustered_files + statistics.unclassified_count + statistics.noise_count == total_files`
+- [ ] Каждый кластер содержит ≥1 файл, `cluster_id` в формате `^[a-z0-9\-]+$`
+- [ ] `quality_metrics.coverage_percent` разумен для валидации через dashboard.html (SC-004)
 
 ---
 
@@ -353,6 +476,12 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 - `taxonomy.json` — источник данных для веб-дашборда, фасетной навигации, рекомендаций
 
 **Промежуточные файлы** (удаляются на Фазе 6):
+- clustering-batches.json
+- batch-{id}-topics.json
+- vault-clusters.json
 - vault-structure-analysis.json
 - {domain}-analysis.json
 - другие временные артефакты
+
+**Переживает cleanup** (кроме `--full`):
+- semantic-analysis-cache.json — кеш LLM-анализа Фазы 0

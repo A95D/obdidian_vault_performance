@@ -395,7 +395,7 @@ def compute_recommended_topics(domain_id: str, topics: list, analysis_data: dict
     return recommendations
 
 
-def generate_taxonomy_json(analysis_data: dict, metadata: dict) -> dict:
+def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: dict = None) -> dict:
     """Генерировать финальную таксономию."""
 
     global_facets = extract_global_facets(analysis_data)
@@ -469,7 +469,8 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict) -> dict:
         },
         "domains": domains,
         "global_facets": global_facets,
-        "statistics": statistics
+        "statistics": statistics,
+        "filtered_out": filtered_out or {"count": 0, "files": []}
     }
 
     return taxonomy
@@ -579,10 +580,16 @@ def main():
         # Загрузить метаданные из phase 1
         vault_structure_file = temp_dir / "vault-structure-analysis.json"
         metadata = {}
+        filtered_out = None
         if vault_structure_file.exists():
             with open(vault_structure_file, "r", encoding="utf-8") as f:
                 vault_data = json.load(f)
                 metadata = vault_data.get("metadata", {})
+                filtered_out = vault_data.get("filtered_out")
+
+        if filtered_out is None and merge_mode and existing_taxonomy:
+            # Инкрементальный прогон без нового Фазы 1 - сохранить прежний список шума
+            filtered_out = existing_taxonomy.get("filtered_out")
 
         # Генерировать таксономию
         if merge_mode:
@@ -628,7 +635,7 @@ def main():
             analysis_data = merged_analysis
             metadata = existing_taxonomy.get("metadata", metadata)
 
-        taxonomy = generate_taxonomy_json(analysis_data, metadata)
+        taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out)
 
         # Верификация
         checks = verify_taxonomy(taxonomy)

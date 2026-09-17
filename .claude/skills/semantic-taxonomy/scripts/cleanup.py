@@ -27,7 +27,10 @@ def partial_cleanup(project_root):
     temp_dir = project_root / ".claude" / "temp_files"
 
     # Финальные артефакты, которые нужно сохранить
-    final_artifacts = {"taxonomy.json"}
+    # semantic-analysis-cache.json - кеш LLM-анализа (Фаза 0), переживает
+    # full/partial cleanup, чтобы не тратить повторные вызовы API на
+    # неизменившиеся файлы; удаляется только явным --full
+    final_artifacts = {"taxonomy.json", "semantic-analysis-cache.json"}
 
     deleted_files = []
 

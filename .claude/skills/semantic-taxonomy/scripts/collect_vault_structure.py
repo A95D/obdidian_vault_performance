@@ -51,8 +51,50 @@ def load_vault_path():
     return Path(vault_path)
 
 
-def collect_vault_structure(vault_path: Path) -> dict:
-    """Собрать структуру vault'а."""
+def load_semantic_clusters(project_root: Path):
+    """
+    Загрузить домены и список шума из результата семантической
+    кластеризации (Фаза 0), если .claude/temp_files/vault-clusters.json
+    существует.
+
+    Возвращает (path_to_domain, noise_files):
+      - path_to_domain: dict {path -> domain_id}, пустой если файла нет
+        (тогда используется folder-based fallback);
+      - noise_files: список {"path", "reason", "stage"} - файлы, отсеянные
+        как мусор (Ступени 1-2), полностью исключаются из vault-structure,
+        никогда не попадают в folder-based fallback.
+    """
+    clusters_path = project_root / ".claude" / "temp_files" / "vault-clusters.json"
+    path_to_domain = {}
+    noise_files = []
+
+    if not clusters_path.exists():
+        return path_to_domain, noise_files
+
+    try:
+        with open(clusters_path, "r", encoding="utf-8") as f:
+            clusters_data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[WARN] Не удалось прочитать vault-clusters.json: {e}", file=sys.stderr)
+        return path_to_domain, noise_files
+
+    for cluster in clusters_data.get("clusters", []):
+        domain_id = cluster["cluster_id"]
+        for file_info in cluster.get("files", []):
+            path_to_domain[file_info["path"]] = domain_id
+
+    noise_files = clusters_data.get("noise_files", [])
+
+    return path_to_domain, noise_files
+
+
+def collect_vault_structure(vault_path: Path, project_root: Path) -> dict:
+    """Собрать структуру vault'а.
+
+    Домены определяются семантически (Фаза 0, vault-clusters.json), если
+    результат кластеризации доступен. Иначе - fallback на folder-based
+    группировку по первому сегменту пути (совместимость со старым режимом).
+    """
 
     # Проверить доступность vault
     if not vault_path.exists():
@@ -63,9 +105,16 @@ def collect_vault_structure(vault_path: Path) -> dict:
 
     print(f"Сканирование хранилища: {vault_path}", file=sys.stderr)
 
+    semantic_domains, noise_files = load_semantic_clusters(project_root)
+    noise_paths = {f["path"] for f in noise_files}
+    domain_mode = "semantic" if semantic_domains else "folder-based"
+    print(f"Режим определения доменов: {domain_mode}", file=sys.stderr)
+    if noise_paths:
+        print(f"Исключено как шум (Фаза 0): {len(noise_paths)}", file=sys.stderr)
+
     # Инициализировать массивы
     all_files = []
-    domains_dict = {}  # Группировка по доменам (первый сегмент пути)
+    domains_dict = {}
     folder_structure = {
         "name": vault_path.name,
         "files": [],
@@ -88,17 +137,28 @@ def collect_vault_structure(vault_path: Path) -> dict:
         # Использовать прямые слэши для кроссплатформенности
         relative_path_posix = relative_path.replace("\\", "/")
 
-        # Определить домен (первый сегмент пути или 'root' если файл в корне)
-        path_parts = relative_path_posix.split("/")
-        domain_id = path_parts[0].lower().replace(" ", "-") if len(path_parts) > 1 and path_parts[0] else "root"
-        if len(path_parts) == 1:
-            domain_id = "root"
+        if relative_path_posix in noise_paths:
+            # Шум (Ступени 1-2 фильтра) - полностью исключается из доменов,
+            # не подставляется folder-based fallback.
+            continue
+
+        if relative_path_posix in semantic_domains:
+            # Домен из семантической кластеризации (Фаза 0)
+            domain_id = semantic_domains[relative_path_posix]
+            domain_name = domain_id.replace("-", " ").title()
+        else:
+            # Fallback: домен по первому сегменту пути (folder-based)
+            path_parts = relative_path_posix.split("/")
+            domain_id = path_parts[0].lower().replace(" ", "-") if len(path_parts) > 1 and path_parts[0] else "root"
+            if len(path_parts) == 1:
+                domain_id = "root"
+            domain_name = path_parts[0] if domain_id != "root" else "Root"
 
         # Инициализировать домен если его еще нет
         if domain_id not in domains_dict:
             domains_dict[domain_id] = {
                 "domain_id": domain_id,
-                "domain_name": path_parts[0] if domain_id != "root" else "Root",
+                "domain_name": domain_name,
                 "files": []
             }
 
@@ -140,12 +200,17 @@ def collect_vault_structure(vault_path: Path) -> dict:
         "folder_structure": folder_structure,
         "all_files": all_files,
         "domains": list(domains_dict.values()),
+        "filtered_out": {
+            "count": len(noise_files),
+            "files": noise_files,
+        },
         "metadata": {
             "total_folders": folder_count,
-            "total_files": len(md_files),
+            "total_files": len(all_files),
             "total_domains": len(domains_dict),
             "ingest_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "vault_path": str(vault_path)
+            "vault_path": str(vault_path),
+            "domain_mode": domain_mode
         }
     }
 
@@ -198,7 +263,7 @@ def main():
         vault_path = load_vault_path()
 
         # Собрать информацию о структуре
-        vault_data = collect_vault_structure(vault_path)
+        vault_data = collect_vault_structure(vault_path, project_root)
 
         # Проверить режим
         new_only_mode = "--new-only" in sys.argv
