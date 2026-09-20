@@ -66,9 +66,24 @@ VAULT_PATH=<путь-к-vault>
 grep "^VAULT_PATH=" .env
 ```
 
-Семантический анализ содержимого файлов (Фаза 0) выполняется субагентом
-`vault-topic-classifier` через Agent tool внутри текущей сессии — отдельный
-LLM API-ключ для этого не требуется.
+Семантический анализ содержимого файлов (Фаза 0) и Фаза 2 — самые тяжёлые
+части этого skill'а. По умолчанию выполняются субагентами
+(`vault-topic-classifier`, `vault-domain-analyzer`) через Agent tool внутри
+текущей сессии — отдельный LLM API-ключ для этого не требуется. Если в
+системе настроен суб-агент `llm` (платформенная песочница, см.
+`~/.llm/orchestrator.md`), эти две фазы делегируются ему — см.
+раздел "Делегирование через llm" перед каждой из фаз.
+
+### Проверка доступности llm (один раз перед Фазой 0.2)
+
+```bash
+llm-ssh test
+```
+
+Результат ("✓ Связь есть" / ошибка или команда не найдена) запомни на весь
+текущий прогон skill'а — повторно перед Фазой 2 не проверяй. Если связи нет
+или команда `llm` отсутствует — обе фазы выполняются как раньше, через
+Agent tool, весь остальной текст про `llm` в этом файле пропускается.
 
 ---
 
@@ -160,9 +175,31 @@ python .claude/skills/semantic-taxonomy/scripts/prepare_clustering_batches.py
 
 **ЗАПРЕЩЕНО**: самому читать файлы vault'а или писать `batch-*-topics.json`
 в основном потоке (orchestrator). Это задача только субагента
-`vault-topic-classifier`.
+`vault-topic-classifier` или (если доступен) суб-агента `llm` по схеме ниже.
 
-Как выполнять:
+### Делегирование через llm (если `llm-ssh test` прошёл)
+
+Батчи обрабатываются последовательно (песочница `llm` — одна сессия, не
+параллельные вызовы, в отличие от Agent tool). Для каждого батча:
+
+```bash
+grep "^VAULT_PATH=" .env                      # взять путь к vault
+llm put <VAULT_PATH>/<файлы_батча>            # закинуть файлы батча в песочницу
+llm put .claude/agents/vault-topic-classifier.md   # ТЗ (схема и правила классификации)
+llm --fresh "Выполни инструкцию из vault-topic-classifier.md для batch_id=\"{batch_id}\", файлы см. в отправленных. Запиши результат в batch-{batch_id}-topics.json по описанной схеме."
+llm get batch-{batch_id}-topics.json          # забрать результат
+```
+
+Полученный `batch-{batch_id}-topics.json` положить в `.claude/temp_files/` —
+дальше он используется в шаге 0.3 точно так же, как если бы его написал
+`vault-topic-classifier` через Agent tool. Если `llm` вернул невалидный JSON
+или не создал файл — для этого батча выполнить fallback через Agent tool
+(`vault-topic-classifier`), остальные батчи это не блокирует.
+
+В диалог — та же 3-строчная сводка на батч, что и для Agent tool, без
+сырого JSON.
+
+Как выполнять (если `llm` недоступен — обычный путь через Agent tool):
 
 1. Прочитать `clustering-batches.json` — список батчей
 2. Для каждого батча запустить Agent tool (в одном сообщении параллельно):
@@ -286,7 +323,32 @@ python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --new
 пишешь `{domain_id}-analysis.json` напрямую (не через Agent tool) — это ошибка:
 останови эти действия и перезапусти шаг через Agent tool.
 
-### Как выполнять
+### Делегирование через llm (если `llm-ssh test` прошёл на шаге Фазы 0)
+
+Домены обрабатываются последовательно (песочница `llm` — одна сессия). Для
+каждого домена:
+
+```bash
+grep "^VAULT_PATH=" .env                              # взять путь к vault
+llm put .claude/temp_files/vault-structure-analysis.json
+llm put <VAULT_PATH>/<файлы_домена>                   # файлы этого domain_id
+llm put .claude/agents/vault-domain-analyzer.md       # ТЗ (схема анализа)
+llm put .claude/skills/analyze-vault-domain/references/REFERENCE.md
+llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md."
+llm get {domain_id}-analysis.json                     # забрать результат
+```
+
+Полученный `{domain_id}-analysis.json` положить в `.claude/temp_files/` — он
+используется в Фазах 3-6 точно так же, как если бы его написал
+`vault-domain-analyzer` через Agent tool. Если `llm` вернул невалидный JSON,
+не создал файл или сводка не сходится (нет `domain_summary`) — для этого
+домена выполнить fallback через Agent tool (`vault-domain-analyzer`),
+остальные домены это не блокирует.
+
+В диалог — та же 4-строчная сводка на домен, что и для Agent tool, без
+сырого JSON.
+
+### Как выполнять (если `llm` недоступен — обычный путь через Agent tool)
 
 1. Прочитать `vault-structure-analysis.json` — получить список доменов и путей файлов
 2. Для каждого домена запустить Agent tool (в одном сообщении параллельно):
