@@ -644,6 +644,84 @@
                 border-bottom: 1px solid var(--border);
             }
         }
+
+        /* ═══════════ FOCUS MODE (первое открытие) ═══════════ */
+        body.focus-mode .container > header,
+        body.focus-mode .container > #content > section:not(.focus-target-section) {
+            filter: blur(3px);
+            opacity: 0.45;
+            pointer-events: none;
+            user-select: none;
+            transition: filter 0.3s var(--transition), opacity 0.3s var(--transition);
+        }
+
+        body.focus-mode .focus-target-section .domain-card:not(.focus-target) {
+            filter: blur(3px);
+            opacity: 0.35;
+            pointer-events: none;
+            user-select: none;
+        }
+
+        body.focus-mode .focus-target-section h2 {
+            filter: blur(3px);
+            opacity: 0.45;
+            pointer-events: none;
+        }
+
+        .domain-card.focus-target {
+            position: relative;
+            z-index: 20;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-md);
+            transform: scale(1.015);
+            transition: transform 0.3s var(--transition), box-shadow 0.3s var(--transition);
+        }
+
+        .focus-hint {
+            position: fixed;
+            left: 50%;
+            bottom: 2rem;
+            transform: translateX(-50%);
+            z-index: 1100;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.7rem 1.1rem;
+            background: var(--text);
+            color: var(--bg);
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            box-shadow: var(--shadow-md);
+            animation: fadeInUp 0.35s var(--transition) both;
+            cursor: pointer;
+            max-width: calc(100% - 2rem);
+        }
+
+        .focus-hint kbd {
+            font-family: inherit;
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 0.1rem 0.4rem;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.18);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+        }
+
+        .focus-hint .focus-hint-dismiss {
+            opacity: 0.65;
+            font-size: 0.78rem;
+            white-space: nowrap;
+        }
+
+        @media (max-width: 640px) {
+            .focus-hint {
+                flex-direction: column;
+                gap: 0.25rem;
+                text-align: center;
+                border-radius: var(--radius);
+            }
+        }
     </style>
 </head>
 <body>
@@ -701,6 +779,9 @@
         /* ═══════════ ЗАГРУЗКА ДАННЫХ ═══════════ */
 
         let domainsById = {};
+        let focusModeActive = false;
+        let focusHintEl = null;
+        let focusTimer = null;
 
         async function loadDashboard() {
             try {
@@ -738,6 +819,7 @@
             renderDomainChart(domains);
             renderDomainCards(domains);
             renderTechnologies(domains);
+            enterFocusMode();
         }
 
         function calculateStats(domains) {
@@ -884,6 +966,68 @@
                 top.map(t => `<span class="tech-tag">${t}</span>`).join('');
         }
 
+        /* ═══════════ FOCUS MODE ═══════════ */
+
+                   function enterFocusMode() {
+            const firstCard = document.querySelector('#domainsGrid .domain-card');
+            if (!firstCard) return;
+
+            focusTimer = setTimeout(() => {
+                focusTimer = null;
+
+                // Пользователь уже открыл карточку сам — фокус не включаем
+                if (!document.getElementById('topicModalOverlay').hidden) return;
+
+                focusModeActive = true;
+                document.body.classList.add('focus-mode');
+
+                const targetSection = firstCard.closest('section');
+                if (targetSection) targetSection.classList.add('focus-target-section');
+
+                firstCard.classList.add('focus-target');
+                firstCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                showFocusHint(firstCard);
+
+                // Клик по карточке — открыть модалку тем и выйти из фокуса
+                firstCard.addEventListener('click', exitFocusMode, { once: true });
+            }, 2000);
+        }
+
+        function showFocusHint(card) {
+            focusHintEl = document.createElement('div');
+            focusHintEl.className = 'focus-hint';
+            focusHintEl.setAttribute('role', 'status');
+            focusHintEl.innerHTML = `
+                <span>👆 Нажмите на карточку «${escapeHtml(card.querySelector('.domain-name').textContent)}», чтобы посмотреть темы</span>
+                <span class="focus-hint-dismiss">Выйти — <kbd>Esc</kbd> или клик здесь</span>
+            `;
+            focusHintEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                exitFocusMode();
+            });
+            document.body.appendChild(focusHintEl);
+        }
+
+        function exitFocusMode() {
+            if (!focusModeActive) return;
+            focusModeActive = false;
+
+            document.body.classList.remove('focus-mode');
+
+            document.querySelectorAll('.focus-target-section').forEach(el =>
+                el.classList.remove('focus-target-section')
+            );
+            document.querySelectorAll('.domain-card.focus-target').forEach(el =>
+                el.classList.remove('focus-target')
+            );
+
+            if (focusHintEl) {
+                focusHintEl.remove();
+                focusHintEl = null;
+            }
+        }
+
         /* ═══════════ МОДАЛЬНОЕ ОКНО ТЕМ ДОМЕНА (макет C) ═══════════ */
 
         let activeModalDomain = null;
@@ -905,7 +1049,12 @@
             return Math.min(100, Math.max(0, Math.round(n)));
         }
 
-        function openTopicModal(domain) {
+           function openTopicModal(domain) {
+            if (focusTimer) {
+                clearTimeout(focusTimer);
+                focusTimer = null;
+            }
+
             activeModalDomain = domain;
             const topics = Array.isArray(domain.topics) ? domain.topics : null;
 
@@ -915,7 +1064,6 @@
             const detailEl = document.getElementById('topicModalDetail');
 
             if (topics === null) {
-                // FR-011 / contracts: поле topics отсутствует — старая таксономия без уровня тем
                 listEl.innerHTML = '';
                 detailEl.innerHTML = `
                     <div class="topic-modal-empty-state">
@@ -924,7 +1072,6 @@
                         проценты проработки и рекомендации.
                     </div>`;
             } else if (topics.length === 0) {
-                // Edge case: непустой домен без единой темы трактуется как ошибка анализа, не как "тем нет"
                 listEl.innerHTML = '';
                 detailEl.innerHTML = `
                     <div class="topic-modal-empty-state">
@@ -1039,8 +1186,13 @@
         });
 
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !document.getElementById('topicModalOverlay').hidden) {
+            if (e.key !== 'Escape') return;
+
+            // Приоритет: сначала закрыть модалку тем, потом выйти из фокуса
+            if (!document.getElementById('topicModalOverlay').hidden) {
                 closeTopicModal();
+            } else if (focusModeActive) {
+                exitFocusMode();
             }
         });
 
