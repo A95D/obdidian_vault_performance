@@ -397,6 +397,79 @@ for domain in domains:
 
 ---
 
+## Фаза 0.4: Обновление графа тем и доменов
+
+Добавлена фичей `003-incremental-progress-graph`. Выполняется после Фазы 2
+(или сразу после Фазы 1 в incremental-режиме, если Фаза 2 для новых файлов
+не запускалась — см. ниже), перед Фазами 3-6.
+
+### Команды
+
+Режим Full (полная пересборка графа):
+```bash
+python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py --full
+```
+
+Режим Incremental (diff поверх существующего графа, по умолчанию):
+```bash
+python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
+```
+
+### Что происходит
+
+1. Скрипт строит/обновляет `.claude/temp_files/topic-graph.json` — трёхуровневый
+   граф домен → тема → файл (узлы + рёбра `member_of`), сравнивая content_hash
+   файлов с хешами, уже записанными в графе.
+2. Новые и изменившиеся файлы помечают свой домен (и, если тема уже известна,
+   тему) как **dirty** — список пишется в
+   `.claude/temp_files/graph-dirty-domains.json` (одноразовый артефакт этого
+   прогона, вход для Фаз 3-6).
+3. Ревизия графа инкрементируется, история пишется в
+   `.claude/temp_files/graph-revision-log.json`.
+
+**Важно про новые файлы**: essence/key_concepts для только что добавленной
+заметки берутся из классификации Фазы 0.2 (`semantic-analysis-cache.json`),
+**не** из полноценного `vault-domain-analyzer` — `vault-domain-analyzer`
+по-прежнему вызывается только на Фазе 2 для реально новых/изменившихся
+доменов, если нужен глубокий анализ их файлов целиком. Если для домена не
+было причины запускать Фазу 2 (например, единственная новая заметка не
+требует полного переанализа домена), узел графа для неё всё равно строится —
+просто с более лёгким источником essence/key_concepts.
+
+### Поиск related/dependencies для новых файлов
+
+Для каждого **нового** файла (не изменившегося — только для `new_file_ids`
+из `graph-dirty-domains.json`) оркестратор вызывает субагента
+`vault-relevance-finder` (**Agent tool**, `subagent_type: "vault-relevance-finder"`,
+модель Haiku) с компактным входом: `essence`/`key_concepts` новой заметки +
+сжатые узлы (`node_id`, `title`, `key_concepts`, `type`) её dirty-домена, без
+доступа к файлам vault.
+
+- Один вызов Agent tool на один новый файл; при нескольких новых файлах —
+  все вызовы в одном сообщении (параллельно), по аналогии с Фазой 2.
+- Ответ — строго `{"related": [...], "dependencies": [...]}`; любые `node_id`,
+  не входящие в переданный список узлов домена, отбрасываются (не
+  применяются как рёбра), это логируется в stderr, а не в диалог.
+- Если вызов на Haiku не удался — повторить тот же вызов с `model: inherit`.
+  Если и это не удалось — `related`/`dependencies` для заметки остаются
+  пустыми, пересчёт остальных dirty-доменов не блокируется.
+- **ЗАПРЕЩЕНО** в диалог выводить сырой JSON графа или ответ субагента
+  целиком — только итоговую сводку по числу новых рёбер (правило 5 CLAUDE.md).
+
+### Проверка
+
+- [ ] `.claude/temp_files/topic-graph.json` создан/обновлён, `revision`
+  увеличился на 1
+- [ ] `.claude/temp_files/graph-dirty-domains.json` создан, `dirty_domains`
+  соответствует доменам реально новых/изменившихся файлов
+- [ ] Для каждого `new_file_id` был вызван `vault-relevance-finder` (или его
+  `model: inherit` повтор), и только для них
+- [ ] Для `changed_file_ids` без тематических изменений `vault-relevance-finder`
+  НЕ вызывался (эта фичa только про новые файлы, не про пересчёт existing-связей)
+- [ ] Ни один raw JSON графа/ответа субагента не попал в диалог
+
+---
+
 ## Фазы 3-6: Синтез таксономии
 
 ### Команды
@@ -406,12 +479,24 @@ for domain in domains:
 python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py
 ```
 
-Режим Incremental (мёржить с существующей):
+Режим Incremental (мёржить с существующей, сужено до dirty-доменов из Фазы 0.4):
 ```bash
 python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --merge
 ```
 
-Скрипт выполняет фазы 3-6 последовательно внутри себя.
+Режим Incremental с полным пересчётом прогресса всех доменов (игнорирует
+dirty-фильтр графа, но по-прежнему мёржит, а не пересобирает `taxonomy.json`
+с нуля):
+```bash
+python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --merge --full
+```
+
+Скрипт выполняет фазы 3-6 последовательно внутри себя. В режиме `--merge` без
+`--full`, если на этом прогоне был создан `.claude/temp_files/graph-dirty-domains.json`,
+пересчёт Фаз 3-5 сужается до доменов из `dirty_domains` — остальные секции
+`taxonomy.json` остаются побайтово нетронутыми. Если `dirty_domains` пуст —
+скрипт завершается без изменений `taxonomy.json` (аналогично проверке Фазы 1
+"новых файлов нет").
 
 ---
 

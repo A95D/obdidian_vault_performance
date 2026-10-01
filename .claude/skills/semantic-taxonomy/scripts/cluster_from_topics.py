@@ -154,9 +154,17 @@ def collect_analyses(temp_dir: Path, batches_data: dict, cache: dict):
 
 
 def normalize_cluster_id(topic: str) -> str:
-    """Привести тему к формату cluster_id (^[a-z0-9\\-]+$)."""
+    """
+    Привести тему к формату cluster_id (слаг из unicode-букв/цифр через дефис).
+
+    ВАЖНО: раньше regex был ASCII-only ([^a-z0-9]+), из-за чего вся кириллица
+    вырезалась и любые две разные русскоязычные темы с общим английским словом
+    (например "PostgreSQL") схлопывались в один и тот же слаг - ложные
+    коллизии cluster_id между несвязанными темами. \\w в Python 3 matches
+    unicode-буквы по умолчанию, поэтому кириллица сохраняется.
+    """
     slug = topic.lower().strip()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
+    slug = re.sub(r"[^\w]+", "-", slug, flags=re.UNICODE).strip("-_")
     return slug or "misc"
 
 
@@ -285,6 +293,102 @@ def build_clusters(analyses, threshold: float = CONFIDENCE_THRESHOLD):
     return list(clusters.values()), unclassified
 
 
+TAXONOMY_FILENAME = "taxonomy.json"
+
+
+def load_existing_domain_folders(project_root: Path) -> dict:
+    """
+    Построить карту "топ-level папка vault -> (domain_id, domain_name)" по уже
+    существующим доменам taxonomy.json (если файл есть). Папка попадает в
+    карту только если однозначно принадлежит одному домену (все файлы домена,
+    лежащие в ней, из одного и того же domain_id) - иначе исключается, чтобы
+    не сливать кластеры по неоднозначному сигналу.
+    """
+    taxonomy_path = project_root / ".claude" / "temp_files" / TAXONOMY_FILENAME
+    if not taxonomy_path.exists():
+        return {}
+
+    try:
+        taxonomy = load_json(taxonomy_path, required=True)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
+
+    folder_to_domains = defaultdict(set)
+    folder_to_name = {}
+    for domain in taxonomy.get("domains", []):
+        domain_id = domain.get("domain_id")
+        domain_name = domain.get("domain_name", domain_id)
+        for file_entry in domain.get("files", []):
+            path = file_entry.get("path", "")
+            if "/" not in path:
+                continue
+            top_folder = path.split("/", 1)[0]
+            folder_to_domains[top_folder].add(domain_id)
+            folder_to_name[(top_folder, domain_id)] = domain_name
+
+    return {
+        folder: (next(iter(domain_ids)), folder_to_name[(folder, next(iter(domain_ids)))])
+        for folder, domain_ids in folder_to_domains.items()
+        if len(domain_ids) == 1
+    }
+
+
+def reconcile_with_existing_domains(clusters: list, folder_domain_map: dict) -> list:
+    """
+    Для каждого нового кластера: если ВСЕ его файлы лежат в топ-level папке,
+    уже однозначно закреплённой за существующим доменом (folder_domain_map),
+    переподключить кластер к этому domain_id/domain_name вместо того, чтобы
+    создавать новый домен. Кластеры, получившие одинаковый cluster_id после
+    этого шага, объединяются в один (files суммируются, metadata
+    пересчитывается).
+
+    Это чинит фрагментацию: когда vault-topic-classifier дал новым файлам из
+    уже известного домена свои уникальные формулировки primary_topic (не
+    совпадающие с темой существующих файлов того же домена), build_clusters()
+    создаёт для них отдельные одно-файловые кластеры вместо слияния с уже
+    существующим доменом. Сигнал "все файлы кластера физически в той же
+    папке, что и уже классифицированный домен" - дешёвый (без LLM) и надёжный
+    способ исправить это post-hoc, без траты токенов на повторный анализ.
+    """
+    if not folder_domain_map:
+        return clusters
+
+    merged: dict = {}
+    for cluster in clusters:
+        top_folders = set()
+        for f in cluster["files"]:
+            path = f["path"]
+            top_folders.add(path.split("/", 1)[0] if "/" in path else path)
+
+        target = None
+        if len(top_folders) == 1:
+            only_folder = next(iter(top_folders))
+            target = folder_domain_map.get(only_folder)
+
+        if target:
+            domain_id, domain_name = target
+            cluster["cluster_id"] = domain_id
+            cluster["cluster_name"] = domain_name
+
+        cid = cluster["cluster_id"]
+        if cid in merged:
+            existing = merged[cid]
+            existing["files"].extend(cluster["files"])
+            existing_concepts = set(existing["metadata"].get("representative_concepts", []))
+            new_concepts = set(cluster["metadata"].get("representative_concepts", []))
+            all_concepts = existing_concepts | new_concepts
+            existing["metadata"]["count"] = len(existing["files"])
+            existing["metadata"]["representative_concepts"] = sorted(all_concepts)[:5]
+            confidences = [cf["confidence"] for cf in existing["files"]]
+            existing["metadata"]["average_confidence"] = round(
+                sum(confidences) / len(confidences), 4
+            ) if confidences else 0
+        else:
+            merged[cid] = cluster
+
+    return list(merged.values())
+
+
 def format_result(clusters, unclassified, noise_files, vault_path: str, total_files: int,
                    processing_time_seconds: float, new_analyses_count: int, cache_hits: int) -> dict:
     """Собрать финальный dict под контракт OUTPUT-clustering-result.json."""
@@ -371,9 +475,15 @@ def main():
         clusters, unclassified_from_clustering = build_clusters(analyses, CONFIDENCE_THRESHOLD)
         unclassified = unclassified_from_collection + unclassified_from_clustering
         noise_files = noise_from_prefilter + noise_from_classifier
+
+        print("[STEP 3.5] Сверка с уже существующими доменами по папкам...", file=sys.stderr)
+        folder_domain_map = load_existing_domain_folders(project_root)
+        clusters_before = len(clusters)
+        clusters = reconcile_with_existing_domains(clusters, folder_domain_map)
+        merged_count = clusters_before - len(clusters)
         print(
-            f"[OK] Создано {len(clusters)} кластеров, unclassified: {len(unclassified)}, "
-            f"шум: {len(noise_files)}",
+            f"[OK] Создано {len(clusters)} кластеров ({merged_count} слито с существующими доменами), "
+            f"unclassified: {len(unclassified)}, шум: {len(noise_files)}",
             file=sys.stderr,
         )
 

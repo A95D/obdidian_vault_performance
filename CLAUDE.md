@@ -14,7 +14,8 @@
 
 1. `CLAUDE.md` (этот файл) - правила репо, инструменты, навигация
 2. `.claude/plans/` - технические планы, если задача уже начата
-3. `.claude/skills/*/SKILL.md` - логика конкретного навыка перед его вызовом
+3. `.claude/retrospectives/` - память проекта. файлы с резюме прошлых доработок
+4. `.claude/skills/*/SKILL.md` - логика конкретного навыка перед его вызовом
 
 ## Структура репозитория
 
@@ -38,6 +39,7 @@ obdidian_vault_performance/
 | Оркестрация построения таксономии | `.claude/skills/semantic-taxonomy/` |
 | Классификация тем батча (Фаза 0) | `.claude/agents/vault-topic-classifier.md` |
 | Фильтр мусорных файлов (шаблоны, пустые заметки) | `prepare_clustering_batches.py` (эвристика) + `cluster_from_topics.py` (`noise_files`) |
+| Граф тем/доменов и dirty-пересчёт прогресса | `build_topic_graph.py` → `topic-graph.json`, `graph-dirty-domains.json` (Фаза 0.4 `semantic-taxonomy/SKILL.md`) |
 | Схема и примеры анализа домена | `.claude/skills/analyze-vault-domain/references/` |
 | Логика миграции vault | `.claude/skills/vault-migration/` |
 | Путь к реальному vault пользователя | `.env` (`VAULT_PATH`) |

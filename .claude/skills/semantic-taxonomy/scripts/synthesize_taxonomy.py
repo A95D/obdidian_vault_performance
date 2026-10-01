@@ -36,6 +36,23 @@ def get_project_root():
     return Path(__file__).resolve().parents[4]
 
 
+def load_dirty_domains(temp_dir: Path) -> dict:
+    """
+    Загрузить graph-dirty-domains.json (T010/T011). Отсутствие файла -
+    build_topic_graph.py ещё не запускался в этом прогоне, не ошибка:
+    вызывающий код в этом случае не сужает область пересчёта.
+    """
+    dirty_path = temp_dir / "graph-dirty-domains.json"
+    if not dirty_path.exists():
+        return None
+    try:
+        with open(dirty_path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[WARN] Ошибка чтения graph-dirty-domains.json: {e}", file=sys.stderr)
+        return None
+
+
 def load_existing_taxonomy(temp_dir: Path) -> dict:
     """Загрузить существующую таксономию если она есть."""
     taxonomy_path = temp_dir / "taxonomy.json"
@@ -540,7 +557,9 @@ def main():
 
         # Проверить режим
         merge_mode = "--merge" in sys.argv
+        full_dirty_mode = "--full" in sys.argv
         existing_taxonomy = None
+        dirty_domains_list = None  # None = не ограничивать (нет graph-dirty-domains.json)
 
         if merge_mode:
             print(f"\n[MERGE] Режим: INCREMENTAL MERGE (--merge)", file=sys.stderr)
@@ -551,6 +570,28 @@ def main():
                 merge_mode = False
             else:
                 print(f"[OK] Загружена существующая таксономия ({existing_taxonomy['metadata']['total_files']} файлов)", file=sys.stderr)
+
+                # T010/T011/T022: сузить пересчёт до dirty-доменов, если граф тем
+                # уже построен в этом прогоне (build_topic_graph.py). --full здесь
+                # означает "считать все домены dirty" (research.md п.4).
+                if full_dirty_mode:
+                    print("[MERGE] --full: пересчитываются все домены (графовый dirty-фильтр не применяется)", file=sys.stderr)
+                else:
+                    dirty_data = load_dirty_domains(temp_dir)
+                    if dirty_data is None:
+                        print("[MERGE] graph-dirty-domains.json не найден - дерево dirty-доменов не сужает пересчёт", file=sys.stderr)
+                    else:
+                        dirty_domains_list = dirty_data.get("dirty_domains", []) or []
+                        if not dirty_domains_list:
+                            # T011: пустой dirty_domains - пересчитывать нечего (data-model.md)
+                            print("[MERGE] dirty_domains пуст - нечего пересчитывать, taxonomy.json не изменяется", file=sys.stderr)
+                            existing_taxonomy['metadata']['analysis_date'] = datetime.now().strftime("%Y-%m-%d")
+                            taxonomy_path = temp_dir / "taxonomy.json"
+                            with open(taxonomy_path, "w", encoding="utf-8") as f:
+                                json.dump(existing_taxonomy, f, indent=2, ensure_ascii=False)
+                            print(f"[SAVE] Сохранено без изменений: {taxonomy_path}", file=sys.stderr)
+                            return 0
+                        print(f"[MERGE] Dirty-домены этого прогона: {', '.join(dirty_domains_list)}", file=sys.stderr)
         else:
             print(f"\n[FULL] Режим: FULL (полный пересбор)", file=sys.stderr)
 
@@ -574,6 +615,15 @@ def main():
             else:
                 print("[ERROR] Файлы анализа доменов не найдены", file=sys.stderr)
                 return 1
+
+        # T010: если граф тем ограничил пересчёт dirty-доменами - отбросить
+        # анализы доменов, не входящих в dirty_domains (защита от случайных
+        # остаточных {domain}-analysis.json файлов прошлых прогонов в temp_files)
+        if merge_mode and dirty_domains_list is not None:
+            skipped = [d for d in analysis_data if d not in dirty_domains_list]
+            analysis_data = {d: v for d, v in analysis_data.items() if d in dirty_domains_list}
+            if skipped:
+                print(f"[MERGE] Пропущены анализы не-dirty доменов: {', '.join(skipped)}", file=sys.stderr)
 
         print(f"[OK] Загружено {len(analysis_data)} новых доменов для анализа", file=sys.stderr)
 
