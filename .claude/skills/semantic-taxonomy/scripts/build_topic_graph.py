@@ -204,8 +204,11 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
         if isinstance(file_type, list):
             file_type = file_type[0] if file_type else None
     else:
+        # Схема кеша Фазы 1 (collect_vault_structure.py --merge): запись по
+        # content_hash = {"domain_id", "essence", "key_concepts"} - essence
+        # уже готовое предложение от vault-topic-classifier, не primary_topic.
         cache_entry = semantic_cache.get(content_hash, {}) if content_hash else {}
-        essence = cache_entry.get("primary_topic", "") or ""
+        essence = cache_entry.get("essence", "") or ""
         key_concepts = cache_entry.get("key_concepts", []) or []
         title = Path(path).stem
         file_type = None
