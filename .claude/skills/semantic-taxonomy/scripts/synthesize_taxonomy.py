@@ -67,6 +67,239 @@ def load_existing_taxonomy(temp_dir: Path) -> dict:
         return None
 
 
+def section_items(section) -> list:
+    """Достать записи секции, принимая и list, и {count, items}."""
+    if isinstance(section, list):
+        return section
+    if isinstance(section, dict):
+        items = section.get("items")
+        return items if isinstance(items, list) else []
+    return []
+
+
+def section_count(section) -> int:
+    """Размер секции: явный count, если он есть, иначе число записей."""
+    if isinstance(section, list):
+        return len(section)
+    if isinstance(section, dict):
+        if isinstance(section.get("count"), int):
+            return section["count"]
+        return len(section_items(section))
+    return 0
+
+
+def normalize_projects_section(projects) -> dict:
+    """
+    Привести секцию projects к форме {"count": N, "items": [{name, files, why}]}.
+
+    count считается по самим файлам, а не берётся из входа: файлы - это то,
+    что попадает в арифметику покрытия, доверять им и есть смысл.
+    """
+    items = []
+    total = 0
+    for entry in section_items(projects):
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files", [])
+        if isinstance(files, str):
+            files = [files]
+        if not isinstance(files, list):
+            continue
+        clean = []
+        for f in files:
+            if isinstance(f, str) and f.strip() and f not in clean:
+                clean.append(f.strip())
+        if not clean:
+            continue
+        total += len(clean)
+        items.append({
+            "name": str(entry.get("name") or ""),
+            "why": str(entry.get("why") or ""),
+            "files": clean,
+        })
+    return {"count": total, "items": items}
+
+
+def normalize_unclassified_section(unclassified) -> dict:
+    """Привести секцию unclassified к форме {"count": N, "items": [{path, reason, suggestion}]}."""
+    items = []
+    seen = set()
+    for entry in section_items(unclassified):
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        path = path.strip()
+        if path in seen:
+            continue
+        seen.add(path)
+        items.append({
+            "path": path,
+            "reason": str(entry.get("reason") or ""),
+            "suggestion": str(entry.get("suggestion") or ""),
+        })
+    return {"count": len(items), "items": items}
+
+
+def merge_projects_sections(existing, new) -> dict:
+    """
+    Объединить проекты прежней taxonomy.json с проектами этого прогона.
+
+    Инкрементальный прогон приносит только новые файлы, поэтому старые
+    проекты из existing должны сохраниться. Ключ слияния - имя проекта,
+    внутри - объединение списков файлов.
+    """
+    by_name = {}
+    for section in (existing, new):
+        for item in normalize_projects_section(section)["items"]:
+            key = item["name"] or item["files"][0]
+            merged = by_name.get(key)
+            if merged is None:
+                by_name[key] = {"name": item["name"], "why": item["why"], "files": list(item["files"])}
+                continue
+            if item["why"] and not merged["why"]:
+                merged["why"] = item["why"]
+            for f in item["files"]:
+                if f not in merged["files"]:
+                    merged["files"].append(f)
+    items = list(by_name.values())
+    return {"count": sum(len(i["files"]) for i in items), "items": items}
+
+
+def merge_unclassified_sections(existing, new) -> dict:
+    """Объединить unclassified прежней taxonomy.json с новым по пути файла."""
+    by_path = {}
+    for section in (existing, new):
+        for item in normalize_unclassified_section(section)["items"]:
+            by_path[item["path"]] = item
+    items = list(by_path.values())
+    return {"count": len(items), "items": items}
+
+
+def collect_accounted_paths(taxonomy: dict) -> set:
+    """Все пути файлов, учтённых в таксономии: домены + projects + unclassified."""
+    paths = set()
+    for domain in taxonomy.get("domains") or []:
+        if not isinstance(domain, dict):
+            continue
+        for file_info in domain.get("files") or []:
+            if isinstance(file_info, dict) and isinstance(file_info.get("path"), str):
+                paths.add(file_info["path"])
+    for item in section_items(taxonomy.get("projects")):
+        if not isinstance(item, dict):
+            continue
+        files = item.get("files")
+        if isinstance(files, str):
+            files = [files]
+        for path in files or []:
+            if isinstance(path, str):
+                paths.add(path)
+    for item in section_items(taxonomy.get("unclassified")):
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            paths.add(item["path"])
+    return paths
+
+
+def known_paths_from_structure(vault_data: dict):
+    """Пути файлов vault по vault-structure-analysis.json: кандидаты + шум."""
+    if not isinstance(vault_data, dict):
+        return None
+    paths = {f["path"] for f in vault_data.get("all_files") or []
+             if isinstance(f, dict) and isinstance(f.get("path"), str)}
+    for f in (vault_data.get("filtered_out") or {}).get("files", []) or []:
+        if isinstance(f, dict) and isinstance(f.get("path"), str):
+            paths.add(f["path"])
+    return paths or None
+
+
+def count_accounted_files(taxonomy: dict):
+    """Сколько файлов уже учтено в готовой taxonomy.json (None - неизвестно)."""
+    if not isinstance(taxonomy, dict):
+        return None
+    meta = taxonomy.get("metadata") or {}
+    stored = meta.get("all_files_count")
+    if isinstance(stored, int):
+        return stored
+    total = meta.get("total_files")
+    if not isinstance(total, int):
+        return None
+    return (
+        total
+        + section_count(taxonomy.get("projects"))
+        + section_count(taxonomy.get("unclassified"))
+        + section_count(taxonomy.get("filtered_out"))
+    )
+
+
+def resolve_all_files_count(metadata: dict, filtered_out, existing_taxonomy: dict, merge_mode: bool):
+    """
+    Сколько .md файлов в vault должна покрывать итоговая taxonomy.json.
+
+    Полный прогон (и любая полная Фаза 1) - все .md vault, то есть
+    кандидаты плюс отсеянный шум. Инкрементальная Фаза 1 - уже учтённое в
+    прежней taxonomy.json плюс новые кандидаты и новый шум этого прогона:
+    база прежней сборки тут единственный источник, отсканированного размера
+    vault недостаточно, он не знает про удалённые файлы, а инкрементальный
+    режим их и не отслеживает. None - число неизвестно, тогда проверка
+    покрытия пропускается.
+    """
+    filtered_count = section_count(filtered_out)
+    if merge_mode:
+        base = count_accounted_files(existing_taxonomy) if existing_taxonomy else None
+        if not metadata:
+            # Фазы 1 в этом прогоне не было - остаётся только прежняя сборка
+            return base
+        if metadata.get("mode") == "incremental":
+            if base is None:
+                return None
+            new_candidates = metadata.get("new_candidates_count")
+            new_noise = metadata.get("new_filtered_count")
+            return (
+                base
+                + (new_candidates if isinstance(new_candidates, int) else 0)
+                + (new_noise if isinstance(new_noise, int) else 0)
+            )
+        # Фаза 1 отработала в полном режиме: vault отсканирован целиком,
+        # прибавлять прежнюю базу нельзя - файлы в карте и в прежней сборке
+        # одни и те же, и сумма разошлась бы вдвое
+    scanned = metadata.get("scanned_md_count")
+    if isinstance(scanned, int):
+        return scanned
+    candidates = metadata.get("candidate_count")
+    if isinstance(candidates, int):
+        return candidates + filtered_count
+    total = metadata.get("total_files")
+    if isinstance(total, int):
+        return total + filtered_count
+    return None
+
+
+def backfill_non_domain_sections(taxonomy: dict, projects, unclassified, all_files_count) -> bool:
+    """
+    Дописать projects/unclassified и счётчики покрытия в готовую taxonomy.json,
+    если их в ней ещё нет (старый формат, либо инкрементальный прогон, где
+    домены не пересчитывались). Ничего не перезаписывает - только дополняет.
+    """
+    changed = False
+    meta = taxonomy.setdefault("metadata", {})
+    stats = taxonomy.setdefault("statistics", {})
+    for key, normalize, raw in (
+        ("projects", normalize_projects_section, projects),
+        ("unclassified", normalize_unclassified_section, unclassified),
+    ):
+        if taxonomy.get(key) is None and raw is not None:
+            section = normalize(raw)
+            taxonomy[key] = section
+            meta[key + "_count"] = section["count"]
+            stats[key + "_count"] = section["count"]
+            changed = True
+    if not isinstance(meta.get("all_files_count"), int) and isinstance(all_files_count, int):
+        meta["all_files_count"] = all_files_count
+        changed = True
+    return changed
+
+
 def merge_domain_files(existing_files: list, new_files: list) -> list:
     """Объединить старые и новые файлы домена, дедуплицируя по path."""
     # Создать словарь по path для быстрого поиска
@@ -412,10 +645,19 @@ def compute_recommended_topics(domain_id: str, topics: list, analysis_data: dict
     return recommendations
 
 
-def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: dict = None) -> dict:
-    """Генерировать финальную таксономию."""
+def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: dict = None,
+                           projects=None, unclassified=None) -> dict:
+    """
+    Генерировать финальную таксономию.
+
+    projects и unclassified - файлы, которым архитектор не назначил домен.
+    Раньше они не доходили до taxonomy.json вообще, и прогон не мог обнаружить
+    их потерю (см. план 2026-10-04-accounted-non-domain-files).
+    """
 
     global_facets = extract_global_facets(analysis_data)
+    projects_section = normalize_projects_section(projects)
+    unclassified_section = normalize_unclassified_section(unclassified)
 
     # Сопоставить смежные темы между доменами до построения объектов доменов
     # (мутирует topics внутри analysis_data in-place — см. research.md п.4)
@@ -454,7 +696,12 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: di
 
     # Вычислить статистику
     statistics = {
+        # total_files намеренно считает только домены: от него зависят
+        # verify_taxonomy и dashboard.calculateStats. Файлы вне доменов живут
+        # в projects_count/unclassified_count и в metadata.all_files_count.
         "total_files": total_files,
+        "projects_count": projects_section["count"],
+        "unclassified_count": unclassified_section["count"],
         "files_per_domain": {d["domain_id"]: d["file_count"] for d in domains},
         "files_per_type": {},
         "files_per_difficulty": {
@@ -476,17 +723,28 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: di
                 difficulty = difficulty_to_level(difficulty_raw)
                 statistics["files_per_difficulty"][difficulty] += 1
 
+    taxonomy_metadata = {
+        "vault_path": metadata.get("vault_path", ""),
+        "analysis_date": datetime.now().strftime("%Y-%m-%d"),
+        "total_files": total_files,
+        "total_domains": len(domains),
+        "projects_count": projects_section["count"],
+        "unclassified_count": unclassified_section["count"],
+        "analyzer_notes": "Full semantic taxonomy based on file content analysis"
+    }
+    # all_files_count - база для проверки покрытия. В старых taxonomy.json его
+    # нет, поэтому поле не добавляется, а проверка помечается SKIP.
+    all_files_count = metadata.get("all_files_count")
+    if isinstance(all_files_count, int):
+        taxonomy_metadata["all_files_count"] = all_files_count
+
     taxonomy = {
-        "metadata": {
-            "vault_path": metadata.get("vault_path", ""),
-            "analysis_date": datetime.now().strftime("%Y-%m-%d"),
-            "total_files": total_files,
-            "total_domains": len(domains),
-            "analyzer_notes": "Full semantic taxonomy based on file content analysis"
-        },
+        "metadata": taxonomy_metadata,
         "domains": domains,
         "global_facets": global_facets,
         "statistics": statistics,
+        "projects": projects_section,
+        "unclassified": unclassified_section,
         "filtered_out": filtered_out or {"count": 0, "files": []}
     }
 
@@ -495,15 +753,27 @@ def generate_taxonomy_json(analysis_data: dict, metadata: dict, filtered_out: di
 
 
 
-def verify_taxonomy(taxonomy: dict) -> dict:
-    """Верификация целостности таксономии."""
+def verify_taxonomy(taxonomy: dict, known_paths=None, strict_paths: bool = False) -> dict:
+    """
+    Верификация целостности таксономии.
+
+    known_paths - пути файлов, которые реально есть в vault (кандидаты плюс
+    отсеянный шум). Без них сверка учтённых путей пропускается.
+    strict_paths - трактовать несовпадение как ошибку, а не предупреждение.
+    Так делает полный прогон, где скан свежий и расхождение означает опечатку
+    в карте доменов или в анализе. В инкрементальном прогоне удалённые из
+    vault файлы остаются в таксономии законно (см. "Ограничения режима
+    Incremental" в SKILL.md), поэтому там это предупреждение.
+    """
 
     checks = {
         "total_files_count": "OK",
         "domains_consistency": "OK",
         "no_orphaned_files": "OK",
         "required_fields": "OK",
-        "topic_required_fields": "OK"
+        "topic_required_fields": "OK",
+        "candidates_accounted": "OK",
+        "files_exist": "OK",
     }
 
     total_files = taxonomy["metadata"]["total_files"]
@@ -542,7 +812,84 @@ def verify_taxonomy(taxonomy: dict) -> dict:
     if bad_topics > 0:
         checks["topic_required_fields"] = f"WARN: {bad_topics} topics missing topic_id/topic_name/summary"
 
+    # Покрытие: каждый .md файл vault обязан оказаться либо в домене, либо в
+    # projects, либо в unclassified, либо в filtered_out. Без этой проверки
+    # пропавшие файлы не давали о себе знать нигде (54 + 0 + 0 + 4 = 58 != 75).
+    projects_count = section_count(taxonomy.get("projects"))
+    unclassified_count = section_count(taxonomy.get("unclassified"))
+    filtered_count = section_count(taxonomy.get("filtered_out"))
+    accounted = total_files + projects_count + unclassified_count + filtered_count
+    all_files_count = (taxonomy.get("metadata") or {}).get("all_files_count")
+    accounting = (
+        f"{total_files} (в доменах) + {projects_count} (projects) "
+        f"+ {unclassified_count} (unclassified) + {filtered_count} (filtered_out) "
+        f"= {accounted}"
+    )
+    if not isinstance(all_files_count, int):
+        checks["candidates_accounted"] = "SKIP: в metadata нет all_files_count (старый формат taxonomy.json)"
+    elif accounted == all_files_count:
+        checks["candidates_accounted"] = "OK: " + accounting
+    else:
+        checks["candidates_accounted"] = f"FAIL: {accounting} != {all_files_count} .md в vault"
+
+    # Сверка идентичности, а не только количества: опечатка в пути (кириллица,
+    # регистр, лишний пробел) даёт верный счёт и при этом настоящий файл
+    # остаётся неучтённым - именно так в прогоне 2026-10-04 потерялся путь
+    # "...Параллельный доступ.md" из домена postgresql-query-optimization.
+    if known_paths is None:
+        checks["files_exist"] = "SKIP: пути vault не переданы"
+    else:
+        accounted_paths = collect_accounted_paths(taxonomy)
+        unknown = sorted(accounted_paths - set(known_paths))
+        if unknown:
+            shown = ", ".join(unknown[:3]) + (", ..." if len(unknown) > 3 else "")
+            message = f"{len(unknown)} учтённых путей нет в vault: {shown}"
+            checks["files_exist"] = ("FAIL: " if strict_paths else "WARN: ") + message
+        else:
+            checks["files_exist"] = f"OK: {len(accounted_paths)} путей сверены с vault"
+
     return checks
+
+
+def print_checks(checks: dict) -> None:
+    """Напечатать результаты верификации."""
+    print("\n[CHECK] Верификация:", file=sys.stderr)
+    for check, result in checks.items():
+        print(f"  - {check}: {result}", file=sys.stderr)
+
+
+def verify_file(taxonomy_path: Path) -> int:
+    """
+    Прогнать verify_taxonomy по готовому файлу, ничего не пересобирая.
+
+    Нужен, чтобы проверить чужой или урезанный taxonomy.json: сам прогон
+    всегда перезаписывает файл, и увидеть, как верификация ловит потерю
+    файлов, иначе невозможно.
+    """
+    if not taxonomy_path.exists():
+        print(f"[ERROR] Файл не найден: {taxonomy_path}", file=sys.stderr)
+        return 1
+    with open(taxonomy_path, "r", encoding="utf-8-sig") as f:
+        taxonomy = json.load(f)
+    print(f"[INFO] Проверка файла: {taxonomy_path}", file=sys.stderr)
+    known_paths = None
+    strict_paths = False
+    structure_path = taxonomy_path.parent / "vault-structure-analysis.json"
+    if structure_path.exists():
+        try:
+            with open(structure_path, "r", encoding="utf-8") as f:
+                structure = json.load(f)
+            known_paths = known_paths_from_structure(structure)
+            strict_paths = (structure.get("metadata") or {}).get("mode") != "incremental"
+        except (json.JSONDecodeError, IOError):
+            known_paths = None
+    checks = verify_taxonomy(taxonomy, known_paths, strict_paths)
+    print_checks(checks)
+    failed = [name for name, result in checks.items() if str(result).startswith("FAIL")]
+    if failed:
+        print(f"[FAIL] Провалено проверок: {len(failed)} - {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main():
@@ -554,6 +901,37 @@ def main():
 
         print(f"[INFO] Корень проекта: {project_root}", file=sys.stderr)
         print(f"[INFO] Директория temp_files: {temp_dir}", file=sys.stderr)
+
+        if "--verify" in sys.argv:
+            # путь можно не указывать - тогда проверяется штатный taxonomy.json
+            after = sys.argv[sys.argv.index("--verify") + 1:]
+            target = Path(after[0]) if after and not after[0].startswith("-") else temp_dir / "taxonomy.json"
+            return verify_file(target)
+
+        # Данные Фазы 1 нужны и ранним выходам (дописывают секции
+        # projects/unclassified в готовый файл), поэтому читаются до них
+        vault_structure_file = temp_dir / "vault-structure-analysis.json"
+        metadata = {}
+        filtered_out = None
+        projects = None
+        unclassified = None
+        vault_data = None
+        if vault_structure_file.exists():
+            try:
+                with open(vault_structure_file, "r", encoding="utf-8") as f:
+                    vault_data = json.load(f)
+                metadata = vault_data.get("metadata", {})
+                filtered_out = vault_data.get("filtered_out")
+                projects = vault_data.get("projects")
+                unclassified = vault_data.get("unclassified")
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"[WARN] Ошибка чтения {vault_structure_file.name}: {e}", file=sys.stderr)
+
+        # Пути файлов vault для сверки учтённых файлов с настоящими.
+        # Полный прогон - скан свежий, расхождение это опечатка; инкрементальный
+        # оставляет удалённые файлы законно, там расхождение не ошибка.
+        known_paths = known_paths_from_structure(vault_data)
+        strict_paths = (metadata.get("mode") != "incremental")
 
         # Проверить режим
         merge_mode = "--merge" in sys.argv
@@ -585,6 +963,13 @@ def main():
                         if not dirty_domains_list:
                             # T011: пустой dirty_domains - пересчитывать нечего (data-model.md)
                             print("[MERGE] dirty_domains пуст - нечего пересчитывать, taxonomy.json не изменяется", file=sys.stderr)
+                            if backfill_non_domain_sections(
+                                    existing_taxonomy, projects, unclassified,
+                                    resolve_all_files_count(
+                                        metadata, filtered_out or existing_taxonomy.get("filtered_out"),
+                                        existing_taxonomy, True)):
+                                print("[INFO] В taxonomy.json дописаны секции projects/unclassified и счётчики покрытия", file=sys.stderr)
+                            print_checks(verify_taxonomy(existing_taxonomy, known_paths, strict_paths))
                             existing_taxonomy['metadata']['analysis_date'] = datetime.now().strftime("%Y-%m-%d")
                             taxonomy_path = temp_dir / "taxonomy.json"
                             with open(taxonomy_path, "w", encoding="utf-8") as f:
@@ -604,6 +989,13 @@ def main():
         if not analysis_data:
             if merge_mode:
                 print("[INFO] Файлы анализа не найдены. Сохранение существующей таксономии без изменений.", file=sys.stderr)
+                if backfill_non_domain_sections(
+                        existing_taxonomy, projects, unclassified,
+                        resolve_all_files_count(
+                            metadata, filtered_out or existing_taxonomy.get("filtered_out"),
+                            existing_taxonomy, True)):
+                    print("[INFO] В taxonomy.json дописаны секции projects/unclassified и счётчики покрытия", file=sys.stderr)
+                print_checks(verify_taxonomy(existing_taxonomy, known_paths, strict_paths))
                 # Обновить дату анализа и сохранить
                 existing_taxonomy['metadata']['analysis_date'] = datetime.now().strftime("%Y-%m-%d")
                 existing_taxonomy['metadata']['analyzer_notes'] = "Incremental update: no new files to merge"
@@ -627,19 +1019,27 @@ def main():
 
         print(f"[OK] Загружено {len(analysis_data)} новых доменов для анализа", file=sys.stderr)
 
-        # Загрузить метаданные из phase 1
-        vault_structure_file = temp_dir / "vault-structure-analysis.json"
-        metadata = {}
-        filtered_out = None
-        if vault_structure_file.exists():
-            with open(vault_structure_file, "r", encoding="utf-8") as f:
-                vault_data = json.load(f)
-                metadata = vault_data.get("metadata", {})
-                filtered_out = vault_data.get("filtered_out")
-
         if filtered_out is None and merge_mode and existing_taxonomy:
             # Инкрементальный прогон без нового Фазы 1 - сохранить прежний список шума
             filtered_out = existing_taxonomy.get("filtered_out")
+
+        # Проекты и нераспознанные файлы: в полном прогоне берём этот прогон,
+        # в инкрементальном сливаем с прежней taxonomy.json, иначе старые
+        # записи (уже учтённые файлы) из неё бы выпали.
+        if merge_mode and existing_taxonomy:
+            projects = merge_projects_sections(existing_taxonomy.get("projects"), projects)
+            unclassified = merge_unclassified_sections(existing_taxonomy.get("unclassified"), unclassified)
+        else:
+            projects = normalize_projects_section(projects)
+            unclassified = normalize_unclassified_section(unclassified)
+
+        # Сколько .md в vault должна покрывать итоговая taxonomy.json - база
+        # для проверки candidates_accounted.
+        all_files_count = resolve_all_files_count(
+            metadata, filtered_out, existing_taxonomy, merge_mode)
+        structure_metadata = dict(metadata)
+        if isinstance(all_files_count, int):
+            structure_metadata["all_files_count"] = all_files_count
 
         # Генерировать таксономию
         if merge_mode:
@@ -683,15 +1083,20 @@ def main():
                     print(f"  - {domain_id}: новый домен с {len(domain_data.get('files', []))} файлами", file=sys.stderr)
 
             analysis_data = merged_analysis
-            metadata = existing_taxonomy.get("metadata", metadata)
 
-        taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out)
+        # В merge-режиме сохраняем прежние метаданные (путь, дата), но счётчики
+        # и базу покрытия - пересчитанные в этом прогоне.
+        metadata = structure_metadata
+        if merge_mode and existing_taxonomy:
+            metadata = dict(existing_taxonomy.get("metadata", metadata))
+            if isinstance(all_files_count, int):
+                metadata["all_files_count"] = all_files_count
+
+        taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out, projects, unclassified)
 
         # Верификация
-        checks = verify_taxonomy(taxonomy)
-        print("\n[CHECK] Верификация:", file=sys.stderr)
-        for check, result in checks.items():
-            print(f"  - {check}: {result}", file=sys.stderr)
+        checks = verify_taxonomy(taxonomy, known_paths, strict_paths)
+        print_checks(checks)
 
         # Обновить metadata если merge режим
         if merge_mode:

@@ -66,16 +66,15 @@ VAULT_PATH=<путь-к-vault>
 grep "^VAULT_PATH=" .env
 ```
 
-Шаг классификации внутри Фазы 1 и Фаза 2 — самые тяжёлые части этого
-skill'а. По умолчанию выполняются субагентами (`vault-topic-classifier`,
-`vault-domain-analyzer`) через Agent tool внутри текущей сессии — отдельный
-LLM API-ключ для этого не требуется. Если в системе настроен суб-агент `llm`
-(платформенная песочница, см. `~/.llm/orchestrator.md`), эти два шага
-делегируются ему — см. раздел "Делегирование через llm" перед каждым из них.
-Для шага классификации Фазы 1 разницы между путём через Agent tool и через
-`llm` больше нет — оба последовательные, батч за батчем.
+Шаг 1.2 (проектирование карты доменов) и Фаза 2 (глубокий анализ) —
+самые тяжёлые части этого skill'а. По умолчанию выполняются субагентами
+(`vault-domain-architect`, `vault-domain-analyzer`) через Agent tool внутри
+текущей сессии — отдельный LLM API-ключ для этого не требуется. Если в системе
+настроен суб-агент `llm` (платформенная песочница, см. `~/.llm/orchestrator.md`),
+эти два шага делегируются ему. Шаг 1.2 выполняется **ровно один раз за прогон**,
+поэтому последовательность не важна.
 
-### Проверка доступности llm (один раз перед шагом классификации Фазы 1)
+### Проверка доступности llm (один раз перед шагом 1.2)
 
 ```bash
 llm-ssh test
@@ -88,15 +87,17 @@ Agent tool, весь остальной текст про `llm` в этом фа
 
 ---
 
-## Поток выполнения (7 фаз)
+## Поток выполнения
 
 ```
-Фаза 1 (Ingest + Classify)
-    ├─ 1.1 collect_vault_structure.py --prepare-batches  [Python]  clustering-batches.json, domain-vocabulary.json
-    ├─ 1.2 vault-topic-classifier × N  [Agent tool, ПОСЛЕДОВАТЕЛЬНО]  batch-*-assignments.json + domain-vocabulary.json (накопление)
-    └─ 1.3 collect_vault_structure.py --merge  [Python]  vault-structure-analysis.json
+Фаза 1 (Scan + Architect)
+    ├─ 1.1 collect_vault_structure.py --scan  [Python]  vault-scan.json
+    ├─ 1.2 vault-domain-architect × 1  [Agent tool, ВЕСЬ VAULT]  domain-map.json
+    └─ 1.3 collect_vault_structure.py --collect  [Python]  vault-structure-analysis.json
     ↓
-Фаза 2 (Deep Read)    [Agent tool]       *-analysis.json (по доменам)
+Фаза 2 (Deep Read)    [Agent tool]       *-analysis.json (по доменам, параллельно)
+    ↓
+Фаза 1.4 (Incremental Progress Graph)   [Python]     build_topic_graph.py
     ↓
 Фазы 3-6 (Python)     [synthesize_taxonomy.py]
     ├─ Фаза 3: Выявление фасетов и иерархий
@@ -106,188 +107,168 @@ Agent tool, весь остальной текст про `llm` в этом фа
 cleanup.py (удаляет промежуточные файлы)
 ```
 
-Домены определяются по содержимому файлов (шаг 1.2), а не по структуре
-папок: `collect_vault_structure.py --merge` берёт домен файла из
-`batch-*-assignments.json` (свежая классификация) и кеша (неизменившиеся
-файлы). Файлы, не получившие уверенного домена (`unclassified`), всё равно
-получают домен через folder-based fallback. Файлы из `noise_files`
-(эвристический пре-фильтр шага 1.1 + `skipped` шага 1.2) полностью
-исключаются из `vault-structure-analysis.json` и попадают в отдельную
-секцию `filtered_out` итоговой `taxonomy.json` — ни в один домен, включая
-folder-based fallback, они не попадают.
+Домены определяются по содержимому заметок, а не по структуре папок.
+Файлы, которым архитектор не смог назначить домен, попадают в `unclassified`
+внутри `domain-map.json`, практические заметки проектов - в `projects`.
+Обе секции пробрасываются дальше и попадают в финальный `taxonomy.json`
+как `projects` и `unclassified` - иначе эти файлы исчезали бы из отчёта
+бесшумно, и следующий прогон не смог бы их обнаружить. Отсеянные скриптом
+мусорные файлы попадают в секцию `filtered_out` и ни в один домен не
+попадают.
+
+Арифметика прогона обязана сходиться:
+
+```
+total_files (в доменах) + projects.count + unclassified.count + filtered_out.count
+    == metadata.all_files_count (в все .md в vault)
+```
+
+Её проверяет `verify_taxonomy` (строка `candidates_accounted`), результат
+виден в stderr и в шапке дашборда. Расхождение означает, что часть заметок
+никем не учтена.
+
+Второй уровень защиты - сверка `files_exist`: каждый учтённый путь должен
+реально существовать в vault. Одного счёта мало, опечатка в пути (кириллица,
+регистр, лишний пробел) даёт верную арифметику и при этом оставляет
+настоящий файл неучтённым - так в прогоне 2026-10-04 потерялся путь
+"...Параллельный доступ.md" в домене postgresql-query-optimization. В полном
+прогоне расхождение это `FAIL` (скан свежий, значит виновата карта или анализ),
+в инкрементальном - `WARN`: удалённые из vault файлы остаются в таксономии
+законно.
 
 ### Таблица фаз
 
 | Фаза | Инструмент | Выходной файл | Сохран. |
 |------|-----------|---|---|
-| 1.1 Batching | Python | clustering-batches.json, domain-vocabulary.json | Временный |
-| 1.2 Classify + Cluster | Agent tool, последовательно | batch-{id}-assignments.json, domain-vocabulary.json | Временный |
-| 1.3 Merge | Python | vault-structure-analysis.json | Временный |
-| 2. Deep Read | Agent tool | {domain}-analysis.json | Временный |
-| 3. Synthesis | Python (в памяти) | — | — |
+| 1.1 Scan | Python | vault-scan.json | Временный |
+| 1.2 Architect | Agent tool, один вызов | domain-map.json | Финальный |
+| 1.3 Collect | Python | vault-structure-analysis.json | Временный |
+| 2. Deep Read | Agent tool, параллельно | {domain}-analysis.json | Временный |
+| 1.4 Graph | Python | topic-graph.json, graph-dirty-domains.json | graph.json сохраняется |
+| 3. Synthesis | Python (в памяти) | - | - |
 | 4-5. JSON Generation | Python | taxonomy.json | ✓ Финальный |
-| 6. Validation & Cleanup | Python | — | — |
+| 6. Validation & Cleanup | Python | - | - |
 
-**Финальные артефакты**: `.claude/temp_files/taxonomy.json`
+**Финальные артефакты**: `.claude/temp_files/taxonomy.json`,
+`.claude/temp_files/domain-map.json`, `.claude/temp_files/semantic-analysis-cache.json`,
+`.claude/temp_files/topic-graph.json`, `.claude/temp_files/graph-revision-log.json`
 
 ---
 
-## Фаза 1: Сбор структуры и сквозная классификация доменов (Ingest + Classify)
+## Фаза 1: Сбор структуры и проектирование карты доменов
 
-Три шага: скрипт (подготовка батчей) → субагент (классификация и
-кластеризация по доменам, один тип AI-вызова, батч за батчем) → скрипт
-(слияние). Семантический анализ содержимого — это всегда работа субагента
-`vault-topic-classifier` через Agent tool, никогда не прямой API-вызов из
-скрипта.
+Три шага: скрипт (скан и отсев мусора) → **один** субагент (проектирование
+доменов и раскладка файлов) → скрипт (сборка структуры и обновление кеша).
+Внешнего справочника нет: границы доменов выводит агент из материала.
 
-Vault пользователя может содержать сотни файлов — один агент не прочитает
-всё за один вызов. Батчи остаются необходимостью, но, в отличие от прежней
-Фазы 0, батчи обрабатываются **последовательно**, не параллельно: список
-доменов (`domain-vocabulary.json`) накапливается по ходу — каждый следующий
-батч получает уже существующий словарь и обязан сначала проверить, подходит
-ли существующий домен, прежде чем заводить новый. Это осознанный компромисс
-параллелизма ради консистентности названий доменов между батчами.
-
-### Шаг 1.1: Подготовка батчей
+### Шаг 1.1: Скан vault
 
 Режим Full:
 ```bash
-python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --prepare-batches
+python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --scan
 ```
 
 Режим Incremental:
 ```bash
-python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --prepare-batches --new-only
+python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --scan --new-only
 ```
 
-Сканирует все `.md` файлы vault'а и сначала прогоняет их через дешёвый
-эвристический пре-фильтр шума (без LLM): файлы из служебных папок
-(`templates/`, `attachments/`, `.trash/` и т.п.), пустые заметки и файлы
-только с frontmatter отсеиваются сразу и в батчи на классификацию не
-попадают — они уже мусор, незачем тратить на них шаг 1.2 и Фазу 2. Затем
-для оставшихся файлов сверяется content-hash с `semantic-analysis-cache.json`
-— файлы с неизменившимся хешем в батчи тоже не попадают (экономия — не идут
-на повторную классификацию). Новые/изменившиеся файлы группируются в батчи
-по 15 файлов, порядок батчей фиксированный (по пути файла).
+Сканирует все `.md` файлы и прогоняет их через эвристический пре-фильтр
+шума **без LLM**: служебные папки (`templates/`, `attachments/`, `.trash/`,
+`.obsidian/`, `_resources/` и т.п.), пустые заметки, файлы только с
+frontmatter и файлы, состоящие только из вставок изображений
+(`embed_only`) - синтаксис вставок сам по себе даёт достаточно символов,
+чтобы пройти порог длины, поэтому такие строки вырезаются перед проверкой.
+Затем content-hash сверяется с `semantic-analysis-cache.json`: поле
+`in_cache` показывает архитектору, что заметка не менялась.
 
-В режиме `--new-only` дополнительно: `domain-vocabulary.json` сидируется из
-доменов существующей `taxonomy.json` (чтобы батчи продолжали использовать
-уже известные domain_id и искали подходящий домен среди них в первую
-очередь). Создание нового домена при отсутствии подходящего работает
-одинаково в обоих режимах (Full и Incremental) — см. шаг 1.2. В режиме Full
-`domain-vocabulary.json` создаётся пустым.
+Выход: `.claude/temp_files/vault-scan.json` - поля `total_files`,
+`candidate_count`, `cached_count`, `files` (`path`, `folder`, `name`,
+`content_hash`, `in_cache`), `filtered_out`, `mode`.
 
-Выход: `.claude/temp_files/clustering-batches.json` — поля `batches`,
-`cached_files`, `cached_file_count`,
-`prefiltered_files`, `prefiltered_count`, `files_to_analyze`, `total_files`.
-И `.claude/temp_files/domain-vocabulary.json` — стартовый словарь.
-
-Если `files_to_analyze == 0` — все файлы уже в кеше, шаг 1.2 пропускается,
-сразу переходи к шагу 1.3.
-
-### Шаг 1.2: Классификация и кластеризация доменов (Agent tool)
+### Шаг 1.2: Проектирование карты доменов (Agent tool)
 
 ### ⚠️ КРИТИЧЕСКИ ВАЖНО: способ вызова
 
-- **ОБЯЗАТЕЛЬНО**: используй инструмент **Agent** с `subagent_type: "vault-topic-classifier"`
-- **ОБЯЗАТЕЛЬНО**: вызовы для батчей — **строго последовательно**, один за
-  другим, каждый следующий вызывается только после завершения предыдущего
-  (в отличие от Фазы 2, где `vault-domain-analyzer` запускается одним
-  сообщением параллельно). Параллельные вызовы здесь недопустимы — агент
-  следующего батча должен увидеть домены, уже добавленные предыдущим.
-- **После каждого вызова**: в основной чат попадает только короткая
-  3-строчная сводка на батч — никакого JSON, никаких Read/Write в диалог.
+- **ОБЯЗАТЕЛЬНО**: инструмент **Agent** с `subagent_type: "vault-domain-architect"`
+- **ОБЯЗАТЕЛЬНО**: **ровно один вызов на весь прогон**. Не по батчам, не
+  по частям. Агент обязан увидеть весь материал, иначе вернётся дрейф
+  границ между частями.
+- **После вызова**: в чат попадает только 5-строчная сводка агента, никакого
+  JSON, никаких Read/Write в диалог.
 
-**ЗАПРЕЩЕНО**: самому читать файлы vault'а или писать
-`batch-*-assignments.json`/`domain-vocabulary.json` в основном потоке
-(orchestrator). Это задача только субагента `vault-topic-classifier` или
-(если доступен) суб-агента `llm` по схеме ниже.
+**ЗАПРЕЩЕНО**: оркестратору самому читать заметки vault или писать
+`domain-map.json`. Это задача только субагента.
 
-### Делегирование через llm (если `llm-ssh test` прошёл)
-
-Путь через `llm` не отличается от Agent tool по порядку вызовов — оба
-последовательные. Для каждого батча (по порядку):
-
-```bash
-grep "^VAULT_PATH=" .env                      # взять путь к vault
-llm put <VAULT_PATH>/<файлы_батча>            # закинуть файлы батча в песочницу
-llm put .claude/temp_files/domain-vocabulary.json  # текущий словарь доменов
-llm put .claude/agents/vault-topic-classifier.md   # ТЗ (схема и правила классификации)
-llm --fresh "Выполни инструкцию из vault-topic-classifier.md для batch_id=\"{batch_id}\", файлы см. в отправленных. Запиши результат в batch-{batch_id}-assignments.json и обнови domain-vocabulary.json по описанной схеме."
-llm get batch-{batch_id}-assignments.json     # забрать результат
-llm get domain-vocabulary.json                # забрать обновлённый словарь - вход для СЛЕДУЮЩЕГО батча
-```
-
-Обновлённый `domain-vocabulary.json` обязательно положить обратно в
-`.claude/temp_files/` **и в песочницу `llm`** перед следующим батчем — иначе
-словарь не накопится. Если `llm` вернул невалидный JSON или не создал
-файл — для этого батча выполнить fallback через Agent tool
-(`vault-topic-classifier`), остальные батчи это не блокирует.
-
-В диалог — та же 3-строчная сводка на батч, что и для Agent tool, без
-сырого JSON.
-
-Как выполнять (если `llm` недоступен — обычный путь через Agent tool):
-
-1. Прочитать `clustering-batches.json` — список батчей, по порядку
-2. Для каждого батча по очереди (ждать завершения перед следующим):
+Если существующий `domain-map.json` уже есть (инкрементальный прогон) - передай
+его агенту: он расширяет и правит карту, а не изобретает заново.
 
 ```python
-for batch in batches:  # строго последовательно, не параллельно
-    Agent({
-        description: f"Классификация домена: {batch['batch_id']}",
-        subagent_type: "vault-topic-classifier",
-        prompt: f"""
-        batch_id: "{batch['batch_id']}"
-        files: {batch['files']}
-        """
-    })
-    # дождаться ответа, только потом переходить к следующему batch
+Agent({
+    description: "Карта доменов: весь vault",
+    subagent_type: "vault-domain-architect",
+    prompt: f"""
+    Список заметок: {scan["files"]}
+    Существующая карта (если есть): {existing_map or "нет, строим с нуля"}
+    """
+})
 ```
 
-3. Каждый агент читает/обновляет `domain-vocabulary.json` сам и пишет свой
-   `batch-{batch_id}-assignments.json`
+Правила определения доменов (П1-П5), правило минимума, антифрагментационный
+проход и запреты живут в `.claude/agents/vault-domain-architect.md`. Оркестратор
+их не дублирует.
 
-### Шаг 1.3: Слияние
+### Шаг 1.3: Сборка структуры
 
 Режим Full:
 ```bash
-python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --merge
+python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect
 ```
 
 Режим Incremental:
 ```bash
-python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --merge --new-only
+python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect --new-only
 ```
 
-Читает `clustering-batches.json` + все `batch-*-assignments.json` +
-`domain-vocabulary.json` + кеш, обновляет кеш новыми результатами
-(`content_hash -> {domain_id, essence, key_concepts}`), строит
-`path -> domain_id` напрямую из решений агента (без отдельной кластеризации
-скриптом — она уже выполнена в шаге 1.2). Файлы из `unclassified`
-(`low_confidence`) не мусор — получают домен через
-folder-based fallback. Файлы из `skipped` (`read_error`/
-`empty_or_too_short`) объединяются с `prefiltered_files` шага 1.1 в
-`noise_files` — настоящий мусор, полностью исключается из доменов.
+Читает `vault-scan.json` + `domain-map.json`, строит
+`path -> domain -> topic`, обновляет кеш
+(`content_hash -> {domain_id, essence, key_concepts}`) и применяет
+`.claude/temp_files/domain-merge-map.json` (`{старый_id: новый_id}`), если
+карта доменов изменилась - без этого старый домен вернётся в следующем
+прогоне.
 
-Выход: `.claude/temp_files/vault-structure-analysis.json`. Содержит:
-`metadata` (total_files, total_domains), `domains` (domain_id, domain_name,
-files), `all_files` (плоский список), `filtered_out` (noise_files).
+Выход: `.claude/temp_files/vault-structure-analysis.json` - `metadata`
+(`total_files` = кандидаты, `scanned_md_count` = все .md включая шум,
+`total_domains`, `projects_count`, `unclassified_count`,
+`domain_mode: "architect"`), `domains` (`domain_id`, `domain_name`,
+`purpose`, `files`, `topics`), `all_files`, `projects`, `unclassified`,
+`filtered_out`.
+
+Записи `projects`/`unclassified`, чей путь не найден среди кандидатов
+`vault-scan.json` (опечатка архитектора), отбрасываются с явным сообщением в
+stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `why` у
+проекта тоже идут в stderr - молчаливый дефолт здесь и был причиной потери
+учёта.
 
 ### Проверка
 
-> Чеклист ниже — для внутренней проверки перед переходом к следующей фазе.
+> Чеклист ниже - для внутренней проверки перед переходом к следующей фазе.
 > В диалог выводить не построчный чеклист, а одну итоговую строку по фазе
-> (например: "Фаза 1: сбор структуры и классификация доменов — ок").
+> (например: "Фаза 1: карта доменов - ок").
 
-- [ ] Файл `.claude/temp_files/vault-structure-analysis.json` создан
-- [ ] `domain-vocabulary.json` не содержит двух доменов с идентичным/почти
-  идентичным `description` (признак того, что агент не сверился со
-  словарём перед созданием нового домена)
-- [ ] `total_files` совпадает с ожиданием
-- [ ] `domains` содержит список с полями domain_id, domain_name, files
-- [ ] Все файлы распределены без пропусков (домен или `filtered_out`)
-- [ ] Для incremental-режима: если новых файлов нет, domains пуст и total_files = 0 (дальше не запускать фазу 2)
+- [ ] `vault-scan.json` создан, `filtered_out` содержит только
+      `template_path`, `empty_content`, `frontmatter_only`, `embed_only`
+- [ ] `domain-map.json` создан, `source_files` совпадает с `candidate_count`
+- [ ] Никаких двух доменов с одинаковым словарём и похожим `rationale`
+- [ ] Размеры доменов различаются (ровная сетка - признак подгонки)
+- [ ] Каждая заметка теории ровно в одном домене; практика - только в проектах
+- [ ] Каждая запись `unclassified` имеет `reason` и `suggestion`
+- [ ] `total_files` в `vault-structure-analysis.json` совпадает с ожиданием
+- [ ] `projects_count + unclassified_count + файлы доменов == candidate_count`
+- [ ] Ни один путь в карте доменов не расходится с путями `vault-scan.json`
+      (сверка делается в Фазе 6 проверкой `files_exist`)
+- [ ] В stderr нет сообщений об отброшенных путях и пустых reason/suggestion
+- [ ] Incremental: если новых файлов нет, не запускать Фазу 2
 
 ---
 
@@ -598,6 +579,20 @@ python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --merge -
 - Проверка целостности JSON структуры
 - Проверка консистентности статистики
 - Проверка наличия всех обязательных полей
+- Проверка покрытия `candidates_accounted` - все .md vault учтены либо в
+  домене, либо в `projects`/`unclassified`, либо в `filtered_out`
+- Проверка `files_exist` - каждый учтённый путь существует в vault
+  (FAIL в полном прогоне, WARN в инкрементальном)
+
+Прогнать верификацию по готовому файлу, ничего не пересобирая (пригодится,
+чтобы проверить чужую или урезанную `taxonomy.json`):
+
+```bash
+python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --verify
+python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --verify путь/к/файлу.json
+```
+
+Код возврата 1, если хотя бы одна проверка дала `FAIL`.
 
 После верификации запусти очистку:
 
@@ -612,7 +607,9 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 > Чеклист ниже — для внутренней проверки перед завершением. В диалог — одна
 > итоговая строка (например: "Фаза 6: верификация и очистка — ок").
 
-- [ ] Все файлы vault учтены (0 пропусков)
+- [ ] Все файлы vault учтены (0 пропусков), `candidates_accounted: OK`
+- [ ] `files_exist` без FAIL: ни один учтённый путь не выдуман агентом
+- [ ] `projects` и `unclassified` не пусты, если файлы вне доменов есть
 - [ ] Каждый файл в ровно одном домене
 - [ ] Нет циклических зависимостей
 - [ ] Все related и dependencies ссылки указывают на существующие файлы
@@ -641,12 +638,16 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 - `taxonomy.json` — источник данных для веб-дашборда, фасетной навигации, рекомендаций
 
 **Промежуточные файлы** (удаляются на Фазе 6):
-- clustering-batches.json
-- domain-vocabulary.json
-- batch-{id}-assignments.json
+- vault-scan.json
+- domain-merge-map.json (если карта менялась)
 - vault-structure-analysis.json
 - {domain}-analysis.json
-- другие временные артефакты
+- graph-dirty-domains.json
+- другие временние артефакты
 
 **Переживает cleanup** (кроме `--full`):
+- taxonomy.json — итог анализа
+- domain-map.json — карта доменов от архитектора, единственный носитель
+  сведений о проектах и нераспознанных файлах между прогонами
 - semantic-analysis-cache.json — кеш LLM-анализа Фазы 1
+- topic-graph.json / graph-revision-log.json — состояние графа тем

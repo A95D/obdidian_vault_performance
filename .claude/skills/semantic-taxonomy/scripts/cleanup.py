@@ -27,6 +27,12 @@ def partial_cleanup(project_root):
     temp_dir = project_root / ".claude" / "temp_files"
 
     # Финальные артефакты, которые нужно сохранить
+    # taxonomy.json - результат прогона, единственный носитель учёта всех
+    # файлов vault (домены + projects + unclassified + filtered_out)
+    # domain-map.json - карта доменов от архитектора. Последний носитель
+    # сведений о проектах и нераспознанных файлах: удалённый, он заставил бы
+    # следующий прогон проектировать карту заново вслепую (план
+    # 2026-10-04-accounted-non-domain-files). Удаляется только явным --full
     # semantic-analysis-cache.json - кеш LLM-анализа (Фаза 0), переживает
     # full/partial cleanup, чтобы не тратить повторные вызовы API на
     # неизменившиеся файлы; удаляется только явным --full
@@ -36,7 +42,7 @@ def partial_cleanup(project_root):
     # только явным --full. graph-dirty-domains.json НЕ входит сюда - это
     # одноразовый артефакт прогона, чистится обычным partial cleanup.
     final_artifacts = {
-        "taxonomy.json", "semantic-analysis-cache.json",
+        "taxonomy.json", "domain-map.json", "semantic-analysis-cache.json",
         "topic-graph.json", "graph-revision-log.json",
     }
 

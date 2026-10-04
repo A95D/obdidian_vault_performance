@@ -4,3 +4,4 @@ __pycache__/
 .claude/temp_files/
 .claude/retrospectives/
 .claude/plans/
+.specify/

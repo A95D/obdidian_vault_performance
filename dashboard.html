@@ -130,6 +130,17 @@
             gap: 0.5rem;
         }
 
+        /* Короткая акцентная черта вместо эмодзи в заголовках */
+        h2::before {
+            content: '';
+            width: 3px;
+            height: 1.05em;
+            flex-shrink: 0;
+            border-radius: 2px;
+            background: var(--accent);
+            opacity: 0.85;
+        }
+
         /* ═══════════ STATS ═══════════ */
         .stats-grid {
             display: grid;
@@ -281,6 +292,131 @@
             font-weight: 500;
             color: var(--text-2);
         }
+
+        /* ═══════════ PROJECTS / UNCLASSIFIED (файлы вне доменов) ═══════════ */
+        .side-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: all 0.2s var(--transition);
+            animation: fadeInUp 0.4s var(--transition) both;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .side-card:hover {
+            border-color: var(--border-strong);
+            box-shadow: var(--shadow-md);
+        }
+
+        .side-card-header {
+            padding: 1.1rem 1.4rem 0.8rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .side-card-title {
+            font-size: 0.98rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 0.3rem;
+            color: var(--text);
+            overflow-wrap: anywhere;
+        }
+
+        .side-card-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-2);
+        }
+
+        .side-card-body {
+            padding: 0.9rem 1.4rem 1.15rem;
+            font-size: 0.83rem;
+            color: var(--text-2);
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            overflow-wrap: anywhere;
+        }
+
+        .side-card-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+        }
+
+        .side-card-list li {
+            font-size: 0.78rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            color: var(--text-2);
+        }
+
+        .side-card-hint {
+            font-size: 0.78rem;
+            color: var(--text-3);
+            font-style: italic;
+        }
+
+        /* ═══════════ СХЛОПЫВАЕМЫЕ СЕКЦИИ (projects / unclassified) ═══════════ */
+        .fold-summary {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            cursor: pointer;
+            list-style: none;
+            border-radius: var(--radius-sm);
+            transition: margin 0.2s var(--transition);
+        }
+
+        .fold-summary::-webkit-details-marker { display: none; }
+        .fold-summary::marker { content: ''; }
+
+        .fold-summary h2 {
+            margin-bottom: 0;
+            transition: color 0.2s var(--transition);
+        }
+
+        .fold-summary:hover h2 { color: var(--accent-hover); }
+
+        .fold-summary:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+        }
+
+        .fold[open] > .fold-summary { margin-bottom: 1.25rem; }
+
+        .fold-badge {
+            flex-shrink: 0;
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--accent-hover);
+            background: var(--accent-soft);
+            border-radius: 999px;
+            padding: 0.1rem 0.55rem;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .fold-chevron {
+            margin-left: auto;
+            width: 8px;
+            height: 8px;
+            flex-shrink: 0;
+            border-right: 2px solid var(--text-3);
+            border-bottom: 2px solid var(--text-3);
+            transform: rotate(45deg) translate(-2px, -2px);
+            transition: transform 0.2s var(--transition);
+        }
+
+        .fold[open] > .fold-summary .fold-chevron {
+            transform: rotate(-135deg) translate(-2px, -2px);
+        }
+
+        .fold-summary:hover .fold-chevron { border-color: var(--accent-hover); }
+
+        .metadata .metadata-ok { color: var(--text-3); }
+        .metadata .metadata-warn { color: var(--advanced); font-weight: 600; }
 
         /* ═══════════ DIFFICULTY ═══════════ */
         .difficulty-chart {
@@ -501,9 +637,17 @@
             color: var(--text-3);
             cursor: pointer;
             padding: 0.25rem 0.5rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-sm);
+            transition: color 0.2s var(--transition), background 0.2s var(--transition);
         }
 
-        .topic-modal-close:hover { color: var(--text); }
+        .topic-modal-close:hover {
+            color: var(--text);
+            background: var(--surface-2);
+        }
 
         .topic-modal-col-left {
             width: 260px;
@@ -662,19 +806,41 @@
             </section>
 
             <section>
-                <h2>📚 Распределение по доменам</h2>
+                <h2>Распределение по доменам</h2>
                 <div class="chart-container">
                     <div class="bar-chart" id="domainChart"></div>
                 </div>
             </section>
 
             <section>
-                <h2>🏛️ Детальный анализ доменов</h2>
+                <h2>Детальный анализ доменов</h2>
                 <div class="domains-grid" id="domainsGrid"></div>
             </section>
 
+            <section id="projectsSection" hidden>
+                <details class="fold">
+                    <summary class="fold-summary">
+                        <h2>Практика в проектах</h2>
+                        <span class="fold-badge" id="projectsBadge"></span>
+                        <span class="fold-chevron" aria-hidden="true"></span>
+                    </summary>
+                    <div class="domains-grid" id="projectsGrid"></div>
+                </details>
+            </section>
+
+            <section id="unclassifiedSection" hidden>
+                <details class="fold">
+                    <summary class="fold-summary">
+                        <h2>Не распознано архитектором</h2>
+                        <span class="fold-badge" id="unclassifiedBadge"></span>
+                        <span class="fold-chevron" aria-hidden="true"></span>
+                    </summary>
+                    <div class="domains-grid" id="unclassifiedGrid"></div>
+                </details>
+            </section>
+
             <section>
-                <h2>⚙️ Используемые технологии</h2>
+                <h2>Используемые технологии</h2>
                 <div class="chart-container">
                     <div class="technologies" id="techsList"></div>
                 </div>
@@ -689,7 +855,11 @@
             <div class="topic-modal-col-left">
                 <div class="topic-modal-header">
                     <h2 id="topicModalDomainName"></h2>
-                    <button class="topic-modal-close" id="topicModalClose" aria-label="Закрыть">✕</button>
+                    <button class="topic-modal-close" id="topicModalClose" aria-label="Закрыть">
+                        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                            <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" fill="none"/>
+                        </svg>
+                    </button>
                 </div>
                 <div id="topicModalList"></div>
             </div>
@@ -730,38 +900,114 @@
             } catch (error) {
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('error').innerHTML =
-                    `<div class="error">❌ Ошибка: ${error.message}</div>`;
+                    `<div class="error">Ошибка загрузки: ${escapeHtml(error.message)}</div>`;
             }
         }
 
         /* ═══════════ РЕНДЕРИНГ ═══════════ */
 
         function renderDashboard(data) {
-            const { metadata, domains } = data;
+            const metadata = data.metadata || {};
+            const domains = Array.isArray(data.domains) ? data.domains : [];
+            // Секции projects/unclassified - файлы, которым архитектор не
+            // назначил домен (появились вместе с учётом в taxonomy.json).
+            // На старом файле без них дашборд обязан открыться без ошибок.
+            const projects = data.projects || { count: 0, items: [] };
+            const unclassified = data.unclassified || { count: 0, items: [] };
 
             domainsById = Object.fromEntries(domains.map(d => [d.domain_id, d]));
 
-            document.getElementById('metadata').innerHTML =
-                `📅 ${metadata.analysis_date} · 📁 ${metadata.vault_path}`;
+            const stats = calculateStats(data);
+            document.getElementById('metadata').innerHTML = renderMetadata(metadata, stats);
 
-            renderStats(calculateStats(domains));
+            renderStats(stats);
             renderDomainChart(domains);
             renderDomainCards(domains);
+            renderProjects(projects);
+            renderUnclassified(unclassified);
             renderTechnologies(domains);
         }
 
-        function calculateStats(domains) {
+        function countProjectFiles(items) {
+            return items.reduce((sum, p) => {
+                const files = Array.isArray(p.files) ? p.files : [];
+                return sum + files.length;
+            }, 0);
+        }
+
+        function sectionItems(section) {
+            return Array.isArray(section && section.items) ? section.items : [];
+        }
+
+        function calculateStats(data) {
+            const domains = Array.isArray(data.domains) ? data.domains : [];
+            const projectItems = sectionItems(data.projects);
+            const unclassifiedItems = sectionItems(data.unclassified);
+            const filtered = data.filtered_out || {};
+            const projectsCount = countProjectFiles(projectItems);
+            const unclassifiedCount = unclassifiedItems.length;
+            const filteredCount = typeof filtered.count === 'number'
+                ? filtered.count
+                : (Array.isArray(filtered.files) ? filtered.files.length : 0);
+            const allFilesCount = typeof (data.metadata || {}).all_files_count === 'number'
+                ? data.metadata.all_files_count
+                : null;
+            const totalFiles = domains.reduce((sum, d) => sum + d.file_count, 0);
+
             return {
-                totalFiles: domains.reduce((sum, d) => sum + d.file_count, 0),
-                totalDomains: domains.length
+                totalFiles: totalFiles,
+                totalDomains: domains.length,
+                projectsCount: projectsCount,
+                unclassifiedCount: unclassifiedCount,
+                filteredOutCount: filteredCount,
+                allFilesCount: allFilesCount,
+                accountedFiles: totalFiles + projectsCount + unclassifiedCount + filteredCount
             };
+        }
+
+        // Русские склонения: 1 файл / 2 файла / 5 файлов
+        function plural(n, one, few, many) {
+            const abs = Math.abs(n);
+            const mod10 = abs % 10;
+            const mod100 = abs % 100;
+            if (mod10 === 1 && mod100 !== 11) return one;
+            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+            return many;
+        }
+
+        function pluralize(n, one, few, many) {
+            return `${n} ${plural(n, one, few, many)}`;
+        }
+
+        const filesLabel = n => pluralize(n, 'файл', 'файла', 'файлов');
+        const projectsLabel = n => pluralize(n, 'проект', 'проекта', 'проектов');
+
+        function renderMetadata(metadata, stats) {
+            const parts = [];
+            if (metadata.analysis_date) {
+                parts.push(`Анализ: ${escapeHtml(metadata.analysis_date)}`);
+            }
+            if (metadata.vault_path) {
+                parts.push(`Vault: ${escapeHtml(metadata.vault_path)}`);
+            }
+            if (stats.allFilesCount !== null) {
+                const covered = stats.accountedFiles === stats.allFilesCount;
+                const cls = covered ? 'metadata-ok' : 'metadata-warn';
+                const hint = covered
+                    ? `учтено ${stats.accountedFiles} из ${stats.allFilesCount} .md`
+                    : `учтено ${stats.accountedFiles} из ${stats.allFilesCount} .md - часть файлов вне таксономии`;
+                parts.push(`<span class="${cls}">${hint}</span>`);
+            }
+            return parts.join(' · ');
         }
 
         function renderStats(stats) {
             const grid = document.getElementById('statsGrid');
             const items = [
                 { label: 'Файлов', value: stats.totalFiles },
-                { label: 'Доменов', value: stats.totalDomains }
+                { label: 'Доменов', value: stats.totalDomains },
+                { label: 'В проектах', value: stats.projectsCount },
+                { label: 'Не распознано', value: stats.unclassifiedCount }
             ];
             grid.innerHTML = items.map((s, i) => `
                 <div class="stat-card" style="animation-delay: ${i * 0.06}s;">
@@ -837,7 +1083,7 @@
                 const pathsHtml = paths.map(([lvl, p]) => `
                     <div class="learning-path">
                         <span class="path-level">${lvl.charAt(0).toUpperCase() + lvl.slice(1)}</span>
-                        <span class="path-hours">📚 ${p.files.length} · ⏱️ ${p.estimated_hours}ч</span>
+                        <span class="path-hours">${filesLabel(p.files.length)} · ${escapeHtml(p.estimated_hours)} ч</span>
                     </div>
                 `).join('');
 
@@ -848,7 +1094,7 @@
                         <div class="domain-header">
                             <div class="domain-name">${d.domain_name}</div>
                             <div class="domain-stats">
-                                <span class="file-count">📄 ${d.file_count} файлов</span>
+                                <span class="file-count">${filesLabel(d.file_count)}</span>
                                 ${renderDifficulty(diff)}
                             </div>
                         </div>
@@ -867,6 +1113,75 @@
                     if (domain) openTopicModal(domain);
                 });
             });
+        }
+
+        function renderProjects(projects) {
+            const section = document.getElementById('projectsSection');
+            const grid = document.getElementById('projectsGrid');
+            const badge = document.getElementById('projectsBadge');
+            const items = sectionItems(projects);
+
+            // Пустую секцию не рисуем: нулевой раздел читается как ошибка данных
+            if (items.length === 0) {
+                section.hidden = true;
+                grid.innerHTML = '';
+                badge.textContent = '';
+                return;
+            }
+
+            section.hidden = false;
+            const totalFiles = countProjectFiles(items);
+            badge.textContent = `${projectsLabel(items.length)} · ${filesLabel(totalFiles)}`;
+            grid.innerHTML = items.map((p, i) => {
+                const files = Array.isArray(p.files) ? p.files : [];
+                return `
+                    <div class="side-card" style="animation-delay: ${i * 0.05}s;">
+                        <div class="side-card-header">
+                            <div class="side-card-title">${escapeHtml(p.name || 'Проект без имени')}</div>
+                            <div class="side-card-subtitle">${filesLabel(files.length)} вне доменов</div>
+                        </div>
+                        <div class="side-card-body">
+                            ${p.why
+                                ? `<div>${escapeHtml(p.why)}</div>`
+                                : '<div class="side-card-hint">Архитектор не указал, почему это проект</div>'}
+                            <ul class="side-card-list">
+                                ${files.map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderUnclassified(unclassified) {
+            const section = document.getElementById('unclassifiedSection');
+            const grid = document.getElementById('unclassifiedGrid');
+            const badge = document.getElementById('unclassifiedBadge');
+            const items = sectionItems(unclassified);
+
+            if (items.length === 0) {
+                section.hidden = true;
+                grid.innerHTML = '';
+                badge.textContent = '';
+                return;
+            }
+
+            section.hidden = false;
+            badge.textContent = filesLabel(items.length);
+            grid.innerHTML = items.map((u, i) => `
+                <div class="side-card" style="animation-delay: ${i * 0.05}s;">
+                    <div class="side-card-header">
+                        <div class="side-card-title">${escapeHtml(u.path || 'файл без пути')}</div>
+                        <div class="side-card-subtitle">домен не назначен</div>
+                    </div>
+                    <div class="side-card-body">
+                        <div><strong>Почему не легла:</strong>
+                            ${u.reason ? escapeHtml(u.reason) : '<span class="side-card-hint">не указано</span>'}</div>
+                        <div><strong>Что завести:</strong>
+                            ${u.suggestion ? escapeHtml(u.suggestion) : '<span class="side-card-hint">не указано</span>'}</div>
+                    </div>
+                </div>
+            `).join('');
         }
 
         function renderTechnologies(domains) {

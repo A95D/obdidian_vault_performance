@@ -7,6 +7,7 @@ description: |
 
   📖 Справочник по схеме: ./references/REFERENCE.md
   📖 Примеры: ./references/examples.json
+disable-model-invocation: true
 ---
 
 # Анализ домена хранилища знаний

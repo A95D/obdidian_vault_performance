@@ -103,18 +103,14 @@ def append_revision_log(temp_dir: Path, revision: int, dirty_domains: list) -> N
 
 def load_path_hash_map(temp_dir: Path) -> dict:
     """
-    path -> content_hash для всех файлов текущего прогона Фазы 0
-    (clustering-batches.json: cached_files + batches[].files).
+    path -> content_hash для всех файлов текущего прогона Фазы 1
+    (vault-scan.json).
     """
-    batches_data = load_json(temp_dir / "clustering-batches.json", {})
+    scan = load_json(temp_dir / "vault-scan.json", {})
     path_hash = {}
-    for entry in batches_data.get("cached_files", []):
+    for entry in scan.get("files", []):
         if "path" in entry and "content_hash" in entry:
             path_hash[entry["path"]] = entry["content_hash"]
-    for batch in batches_data.get("batches", []):
-        for entry in batch.get("files", []):
-            if "path" in entry and "content_hash" in entry:
-                path_hash[entry["path"]] = entry["content_hash"]
     return path_hash
 
 
@@ -204,9 +200,9 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
         if isinstance(file_type, list):
             file_type = file_type[0] if file_type else None
     else:
-        # Схема кеша Фазы 1 (collect_vault_structure.py --merge): запись по
+        # Схема кеша Фазы 1 (collect_vault_structure.py --collect): запись по
         # content_hash = {"domain_id", "essence", "key_concepts"} - essence
-        # уже готовое предложение от vault-topic-classifier, не primary_topic.
+        # берётся из описания темы в domain-map.json.
         cache_entry = semantic_cache.get(content_hash, {}) if content_hash else {}
         essence = cache_entry.get("essence", "") or ""
         key_concepts = cache_entry.get("key_concepts", []) or []
