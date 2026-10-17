@@ -327,21 +327,36 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 Домены обрабатываются последовательно (песочница `llm` — одна сессия). Для
 каждого домена:
 
+Модель песочницы передаётся динамически: каждый вызов `llm` идёт с префиксом
+`LLM_MODEL=<модель, с которой работает оркестратор>`. Значение - один из алиасов
+`opus | sonnet | haiku` (проверено на песочнице: `sonnet` и `opus` принимаются
+без предупреждений, `haiku` отвечает, но пишет `unrecognized_model`; полные ID
+вроде `claude-haiku-5-5` тоже дают предупреждение). Если `LLM_MODEL` не задан,
+`llm` берёт модель из `~/.llm/config` или использует дефолт песочницы.
+
+Перед передачей файлов прогона песочница полностью очищается (старые результаты
+прошлых прогонов иначе попадают в выборку). Очистка выполняется один раз за
+прогон, до первого `llm put`, и проверяется через `llm ls`. Если в выводе
+`llm ls` остались файлы или папки (кроме `.` и `..`), передачу не начинать.
+
 ```bash
+LLM_MODEL=<алиас> llm --fresh "Полностью очисти рабочую папку /workspace/agent: удали все файлы и вложенные папки внутри неё, включая скрытые (rm -rf /workspace/agent/* /workspace/agent/.[!.]* /workspace/agent/..?*). Саму папку /workspace/agent не удаляй. Ответь одной строкой: очищено или нет." </dev/null
+llm ls </dev/null                                     # проверка: пусто, кроме . и ..
 grep "^VAULT_PATH=" .env                              # взять путь к vault
 llm put .claude/temp_files/vault-structure-analysis.json
 llm put <VAULT_PATH>/<файлы_домена>                   # файлы этого domain_id
 llm put .claude/agents/vault-domain-analyzer.md       # ТЗ (схема анализа)
 llm put .claude/skills/analyze-vault-domain/references/REFERENCE.md
-llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md." </dev/null
-bash .claude/skills/semantic-taxonomy/scripts/llm_fetch.sh llm-phase2/{domain_id}-analysis.json .claude/temp_files   # забрать результат
+LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md." </dev/null
+TMP="$(mktemp -d)"                                    # забрать результат: llm get кладёт файл относительно cwd,
+(cd "$TMP" && llm get llm-phase2/{domain_id}-analysis.json </dev/null) && mv -f "$TMP/llm-phase2/{domain_id}-analysis.json" .claude/temp_files/; rm -rf "$TMP"
 ```
 
 Правила для циклов с `llm` (нарушение этих правил уже ломало прогон):
 - Каждый вызов `llm` получает `</dev/null`. Без этого `llm` читает stdin и
   съедает оставшийся список доменов цикла, при этом цикл завершается с кодом 0.
 - Список доменов читается через отдельный дескриптор (`while read ... <&3; done 3< список`).
-- Файлы забираются только через `llm_fetch.sh`: голый `llm get` кладёт файл
+- Файлы забираются только через `llm get` во временной папке (блок выше): голый `llm get` кладёт файл
   относительно текущей папки, то есть в корень проекта.
 - После цикла проверить, что есть все `{domain_id}-analysis.json` и что JSON
   валиден с полем `domain_summary`. Для недостающих доменов - fallback через
