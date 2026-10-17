@@ -800,17 +800,23 @@ def verify_taxonomy(taxonomy: dict, known_paths=None, strict_paths: bool = False
 
     # Проверить обязательные поля в темах доменов (data-model.md -> Topic; см. регрессию schema drift)
     bad_topics = 0
+    bad_domains = set()
     for domain in taxonomy["domains"]:
         for topic in domain.get("topics", []):
             if not isinstance(topic, dict):
                 bad_topics += 1
+                bad_domains.add(domain.get("domain_id"))
                 continue
             required_topic_fields = ["topic_id", "topic_name", "summary"]
             if not all(topic.get(field) for field in required_topic_fields):
                 bad_topics += 1
+                bad_domains.add(domain.get("domain_id"))
 
     if bad_topics > 0:
-        checks["topic_required_fields"] = f"WARN: {bad_topics} topics missing topic_id/topic_name/summary"
+        checks["topic_required_fields"] = (
+            f"WARN: {bad_topics} topics missing topic_id/topic_name/summary "
+            f"in {len(bad_domains)} domains: {', '.join(sorted(str(d) for d in bad_domains))}"
+        )
 
     # Покрытие: каждый .md файл vault обязан оказаться либо в домене, либо в
     # projects, либо в unclassified, либо в filtered_out. Без этой проверки
