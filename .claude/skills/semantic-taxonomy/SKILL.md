@@ -340,8 +340,8 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 `llm ls` остались файлы или папки (кроме `.` и `..`), передачу не начинать.
 
 ```bash
-LLM_MODEL=<алиас> llm --fresh "Полностью очисти рабочую папку /workspace/agent: удали все файлы и вложенные папки внутри неё, включая скрытые (rm -rf /workspace/agent/* /workspace/agent/.[!.]* /workspace/agent/..?*). Саму папку /workspace/agent не удаляй. Ответь одной строкой: очищено или нет." </dev/null
-llm ls </dev/null                                     # проверка: пусто, кроме . и ..
+llm clean                                             # полная очистка /workspace/agent (без модели, проверка внутри)
+llm ls </dev/null                                     # повторная проверка: пусто, кроме . и ..
 grep "^VAULT_PATH=" .env                              # взять путь к vault
 llm put .claude/temp_files/vault-structure-analysis.json
 llm put <VAULT_PATH>/<файлы_домена>                   # файлы этого domain_id
