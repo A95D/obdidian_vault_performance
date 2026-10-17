@@ -22,6 +22,11 @@
 | Скан vault и фильтр мусора (Фаза 1.1) | `scripts/collect_vault_structure.py --scan` (без LLM) |
 | Граф тем/доменов и dirty-пересчёт (Фаза 1.4) | `scripts/build_topic_graph.py` → `topic-graph.json`, `graph-dirty-domains.json` |
 | Финализация таксономии, проверка покрытия | `scripts/synthesize_taxonomy.py` (`--merge`, `--verify`) |
+| Карточки доменов из `taxonomy.json` для архитектора инкремента | `scripts/build_domain_cards.py` → `domain-cards.json` |
+| Применение патча архитектора к карте доменов | `scripts/apply_domain_patch.py` (`patch.json` → `domain-map.json`, `domain-merge-map.json`, `affected-domains.json`) |
+| Переоценка тем затронутого домена (Фаза 3б) | `.claude/agents/vault-topic-reassessor.md`, вход `scripts/build_reassess_input.py` |
+| Проверка ответа переоценки тем | `scripts/validate_reassessed_topics.py --domain ID` → `{domain_id}-topics.validated.json` |
+| Отправка пакета файлов в песочницу `llm` | `scripts/llm_send.sh` (функция `llm_send`, лог `llm_send.log`) |
 | Схема и примеры анализа домена | `.claude/skills/analyze-vault-domain/references/` |
 | Логика миграции vault | `.claude/skills/vault-migration/` |
 | Путь к реальному vault пользователя | `.env` (`VAULT_PATH`) |
@@ -58,20 +63,45 @@
    результат интегрируй и проверяй локально. Нет связи или нет команды `llm` -
    работай через Agent tool. Vault принадлежит пользователю, песочница `llm` -
    его же подписка, поэтому отправка содержимого туда разрешена.
+   Модель передаётся явно: каждый вызов `llm` идёт с префиксом
+   `LLM_MODEL=<алиас модели оркестратора>` (алиасы и детали - в разделе про
+   модель песочницы в `SKILL.md`). Не полагайся на дефолт песочницы и
+   `~/.llm/config`: без префикса песочница может работать на другой модели.
+   Исключение - `llm clean` и `llm-ssh test`, им модель не нужна.
 9. Спека (speckit-* скиллы, `.specify/`, `specs/`) - никогда не коммитить и не
    добавлять в гит: инструменты планирования, не часть релиза. Работай с ней
    локально, в отдельных сессиях.
-10. Инкрементальное обновление (`synthesize_taxonomy.py --merge`)
-    переанализирует только dirty-домены из `graph-dirty-domains.json`
-    (Фаза 1.4). Topics не-dirty доменов остаются как есть, переанализированных -
-    пересчитываются полностью. Пустой `dirty_domains` - Фаза 2 и мёрж
-    пропускаются, `taxonomy.json` не меняется.
-    Связи графа (`dependency` из анализа Фазы 2 и `related`/`dependency` от
-    `vault-relevance-finder`) `dirty_domains` не задают: в него попадают только новые и
-    изменившиеся файлы. Субагент вызывается только для `relevance_required` из
-    `graph-dirty-domains.json` (новые файлы без свежего анализа домена); ответы
-    применяются через `--apply-relevance`, он `graph-dirty-domains.json` не меняет.
-    `--full` стирает связи, полученные от субагента.
+10. Инкрементальное обновление (`synthesize_taxonomy.py --merge`) работает от
+    дельты. Dirty = новые и изменённые файлы: `status` `new | changed` в
+    `vault-scan.json` (`--scan --new-only` сверяет хеш файла с `content_hash` узла
+    `topic-graph.json`) - единственный источник «что нового». Без графа прогон
+    полный. Источник состояния - `taxonomy.json`, `domain-map.json`, граф.
+    - Структура пересматривается дёшево, по накопленным данным, без чтения
+      старых текстов: `build_domain_cards.py` (`domain-cards.json`) ->
+      `vault-domain-architect` в режиме инкремента -> `patch.json` ->
+      `apply_domain_patch.py`. Тексты читаются только у дельты и записей
+      `unclassified`/`projects`.
+    - Глубокий анализ (`vault-domain-analyzer`, режим «добавление») - только
+      дельта. Старые записи файлов берутся из `taxonomy.json`.
+    - Фаза 3б: переоценка тем затронутых доменов (`vault-topic-reassessor`),
+      ответ проверяет `validate_reassessed_topics.py`. Незатронутые домены
+      сохраняют темы как есть.
+    - Граф `build_topic_graph.py` строго после Фаз 2, 3 и 3б. Без свежих
+      `{domain_id}-analysis.json` и `{domain_id}-topics.validated.json` он не
+      запускается, `--merge` не запускается без графа новее `vault-scan.json`
+      и `domain-map.json`.
+    - `--merge` - без LLM: домены собираются из актуальной раскладки, парадигмы,
+      `global_facets`, статистика и learning paths пересчитываются кодом.
+      `taxonomy.json` пишется только при выполненных инвариантах, кеш - после него.
+    - `relevance_required` из `graph-dirty-domains.json` - новые файлы без свежего
+      анализа домена; для них вызывается `vault-relevance-finder`, ответы
+      применяются через `--apply-relevance`, он `graph-dirty-domains.json` не
+      меняет. Связи `dependency` из анализа и `related`/`dependency` от
+      субагента `dirty_domains` не задают.
+    - `--merge --full` пересчитывает прогресс всех доменов без dirty-фильтра, но
+      по-прежнему мёржит. `build_topic_graph.py --full` стирает связи, полученные
+      от субагента.
+    Порядок и защиты - в `.claude/skills/semantic-taxonomy/SKILL.md`.
 11. Агенты работают без ограничения времени, ждать можно сколько угодно.
     - `tools.subagent({run_in_background: true})` - по умолчанию и только так.
       Блокирующий `false` уносит агента вместе с собой по лимиту времени.
@@ -96,6 +126,13 @@
       `git push origin main`.
     - После пуша и релиза ветка удаляется: `git branch -d feature/<имя>` и
       `git push origin --delete feature/<имя>`.
+13. Новая фича - в отдельной feature-ветке. Перед первой правкой под новую фичу:
+    - если есть любая ветка, отличная от `main` - новую не создавай, работай
+      в существующей (`git switch feature/<имя>`), даже если её название
+      относится к другой задаче;
+    - если веток, отличных от `main`, нет - создай от `main`:
+      `git switch -c feature/<описание-фичи> main`.
+    Незакоммиченные изменения чужой задачи в новую ветку не переноси без команды.
 
 ## Архитектура
 

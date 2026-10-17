@@ -42,9 +42,10 @@ description: |
   - Когда: первый запуск, изменение VAULT_PATH, удаление файлов в vault, сомнения в целостности
   - Команда: `python cleanup.py --full`
   
-- **Incremental** — добавить только новые файлы (сохранить старый taxonomy.json)
-  - Когда: регулярное добавление заметок, быстрое обновление
+- **Incremental** — добавить новые и изменённые файлы (сохранить старый taxonomy.json)
+  - Когда: регулярное добавление и правка заметок, быстрое обновление
   - Команда: `python cleanup.py` (без флагов)
+  - Поток, порядок фаз и защиты - в разделе «Инкрементальный прогон» ниже
 
 Жди ответа перед дальнейшими действиями.
 
@@ -98,6 +99,7 @@ Agent tool, весь остальной текст про `llm` в этом фа
 Фаза 2 (Deep Read)    [Agent tool]       *-analysis.json (по доменам, параллельно)
     ↓
 Фаза 1.4 (Incremental Progress Graph)   [Python]     build_topic_graph.py
+    (в режиме Incremental граф строго после Фаз 2, 3 и 3б, см. ниже)
     ↓
 Фазы 3-6 (Python)     [synthesize_taxonomy.py]
     ├─ Фаза 3: Выявление фасетов и иерархий
@@ -145,6 +147,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 | 1.3 Collect | Python | vault-structure-analysis.json | Временный |
 | 2. Deep Read | Agent tool, параллельно | {domain}-analysis.json | Временный |
 | 1.4 Graph | Python | topic-graph.json, graph-dirty-domains.json | graph.json сохраняется |
+| 3б. Reassess (Incremental) | llm или Agent tool | {domain}-topics.validated.json | Временный |
 | 3. Synthesis | Python (в памяти) | - | - |
 | 4-5. JSON Generation | Python | taxonomy.json | ✓ Финальный |
 | 6. Validation & Cleanup | Python | - | - |
@@ -152,6 +155,160 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 **Финальные артефакты**: `.claude/temp_files/taxonomy.json`,
 `.claude/temp_files/domain-map.json`, `.claude/temp_files/semantic-analysis-cache.json`,
 `.claude/temp_files/topic-graph.json`, `.claude/temp_files/graph-revision-log.json`
+
+---
+
+## Инкрементальный прогон (режим Incremental)
+
+Цель: новые и изменённые заметки добавляются дёшево. Дорогое (чтение текстов, LLM)
+- только дельта и записи `unclassified`/`projects`; структура пересматривается по
+уже накопленным данным (`taxonomy.json`, кеш, граф), стоимость растёт от числа
+доменов, а не файлов. Данные файла (`essence`, `type`, `paradigm`, `components`,
+`technologies`, `dependencies`) при переезде между доменами не пересчитываются.
+
+### Порядок фаз (менять нельзя)
+
+```
+1. scan      collect_vault_structure.py --scan --new-only        vault-scan.json (status)
+2. cards     build_domain_cards.py                               domain-cards.json
+3. architect vault-domain-architect, режим инкремента            patch.json
+4. apply     apply_domain_patch.py                               domain-map.json, domain-merge-map.json, affected-domains.json
+             collect_vault_structure.py --collect --new-only     vault-structure-analysis.json
+5. analyzer  vault-domain-analyzer, режим «добавление»           {domain_id}-analysis.json (только дельта)
+6. reassess  build_reassess_input.py -> vault-topic-reassessor
+             -> validate_reassessed_topics.py --domain ID        {domain_id}-topics.validated.json
+7. граф      build_topic_graph.py                                topic-graph.json
+8. merge     synthesize_taxonomy.py --merge                      taxonomy.json (без LLM), затем кеш
+```
+
+Граф строго после шагов 5-6. Дельты нет (нет `new | changed`) - шаги 2-8 не нужны.
+
+**Восстановление при несогласованном графе.** Если граф не содержит файлов, уже учтённых в
+`taxonomy.json` (оборванный прогон), статусы по хешам инвертируются. Одноразовый выход:
+`--scan --new-only --baseline-taxonomy` - `status` считается по путям относительно `taxonomy.json`
+(`new` - пути, которых там нет), в `vault-scan.json` поле `baseline: taxonomy`; изменённые файлы
+так не обнаружить. Анализы доменов с дельтой, свежие по содержимому (хеши совпадают с хешами в
+графе), но старше скана по времени, допустимо обновить `touch` только после такой сверки.
+Тесты `scripts/test_*.py` читают замороженный снимок `.claude/temp_files/_fixtures/` (нет снимка - пропуск).
+
+- **Карточки** (шаг 2): название, назначение, словарь, темы с `essence`, число
+  файлов, плюс секции `unclassified` и `projects` целиком. Читается только `taxonomy.json`.
+- **Архитектор** (шаг 3): вход - карточки и дельта. Выход - патч операций:
+  `add_file`, `create_topic`, `create_domain`, `rename_domain`, `move_topic`,
+  `merge_domains`, `split_domain`, а для записей `unclassified`/`projects` -
+  `classify`, `to_project`, `keep_unclassified` (с новыми `reason` и `suggestion`).
+  У каждой операции обоснование по П1-П5. Спорный случай (вторая школа или новый
+  подход) не блокирует: `confidence: medium`, правится в следующем патче
+  `merge_domains` или `split_domain`. Записи `unclassified` пересматриваются на каждом
+  инкременте: «Bronze Layer» ушёл туда, пока не было заметок про Silver и Gold.
+  Изменённая старая заметка остаётся в своём домене и теме, если архитектор не
+  выдал `move_topic` или `add_file`.
+- **Применение патча** (шаг 4): детерминированно. `rename_domain` и `move_topic`
+  переносят темы с оценками по `topic_id`, `merge_domains` склеивает темы с
+  одинаковым названием, `split_domain` распределяет темы. Домены после `merge`,
+  `split`, `classify` и с новыми файлами - затронутые (`affected-domains.json`),
+  их темы переоцениваются. `--dry-run` проверяет патч, ничего не записывая.
+- **Режим «добавление»** (шаг 5): агент `vault-domain-analyzer` получает тексты
+  только дельты плюс `essence` и `key_concepts` старых файлов домена из
+  `taxonomy.json`. В `files` - записи только дельты, `total_files` - число файлов
+  дельты. Зависимости направлены от новых файлов к любым, у изменённых файлов
+  исходящие `dependencies` пересобираются, взаимных зависимостей и циклов нет.
+  Описание режима - в конце `vault-domain-analyzer.md`.
+- **Фаза 3б** (шаг 6): дешёвый вызов LLM на каждый затронутый домен. Вход
+  (`reassess-input/{domain_id}.json`): текущие темы с `has_notes`,
+  `mastery_percent`, `mastery_rationale`, `note_paths` (ожидаемые темы без заметок
+  включительно), `essence` и `key_concepts` старых файлов, анализ дельты. Выход -
+  `{domain_id}-topics.json` в схеме `domain_summary.topics`: привязка новых заметок
+  к темам, оценки, новые темы, ожидаемые темы (`has_notes: false`,
+  `mastery_percent` не выше 15), обновлённое `description`. Ответу не доверяем:
+  `validate_reassessed_topics.py` выводит `has_notes` из `note_paths`, сверяет
+  `note_paths` с файлами домена, проверяет уникальность `topic_id`, диапазон
+  `mastery_percent` 0-100 и потолок 15 у тем без заметок. Покрытие - это
+  `mastery_percent` по теме (полоса и бейдж в `dashboard.html`), процента домена нет.
+- **Граф и merge** (шаги 7-8): см. Фазу 1.4 и Фазы 3-6. Learning paths строит скрипт
+  по `difficulty` файлов, парадигмы - по `taxonomy.json`, LLM для них не нужен.
+
+### Режим «добавление»
+
+Так называется режим `vault-domain-analyzer`, когда в задании указан режим
+«добавление» или список дельты. Он переопределяет шаги чтения и записи полного
+режима (границы доменов, `boundary_flags`, формат ответа и ошибки - как в полном).
+В строке 2 сводки - число файлов дельты. Вызов анализатора для домена без дельты
+в этом режиме не делается.
+
+### Коды выхода и защиты
+
+Каждая защита - код с ненулевым выходом и сообщением, а не пункт чек-листа.
+
+| Скрипт | 0 | 1 | 2 |
+|---|---|---|---|
+| `apply_domain_patch.py` | патч применён | ошибка валидации (файл не ровно в одном месте, пустая тема), ничего не записано | - |
+| `build_reassess_input.py` | входы собраны | - | нет входного файла или анализа дельты |
+| `validate_reassessed_topics.py` | ответ годен (возможны WARN) | ошибки в ответе | нет входов |
+| `build_topic_graph.py` | граф записан | входы не готовы, цикл `dependency` с ребром дельты, структура и граф расходятся (граф не записан) | ошибка аргументов |
+| `synthesize_taxonomy.py --merge` | `taxonomy.json` записан | нарушен инвариант (`taxonomy.json` и кеш не изменены) | нет входов или они устарели |
+| `synthesize_taxonomy.py --verify` | все проверки OK | хотя бы один `FAIL` | - |
+| `llm_send` | число файлов в `llm ls` совпало | ошибка `llm put` или расхождение | неверные аргументы |
+
+Защиты:
+- **Контракт входов.** Граф не строится, если у домена с дельтой нет
+  `{domain_id}-analysis.json` свежее `vault-scan.json`, а у затронутого домена нет
+  свежего `{domain_id}-topics.validated.json`. `--merge` не запускается без всех
+  входов и без графа новее `vault-scan.json` и `domain-map.json`.
+- **Единый источник «что нового».** Только `status` в `vault-scan.json`. Структура, граф и
+  слияние новизну по-своему не считают.
+- **Структура и граф сверяются.** После построения множество файлов графа сравнивается с
+  `taxonomy.json` плюс дельта; расхождение - `FAIL`.
+- **Циклы `dependency`.** Цикл с ребром дельты - `FAIL` с перечнем файлов (лечение:
+  повторный анализ только затронутых файлов дельты); цикл только из старых рёбер -
+  предупреждение.
+- **Арифметика.** `candidates_accounted` и `files_exist` проверяются перед записью
+  `taxonomy.json`; запись только при `OK`.
+- **Неизменность незатронутого.** Записи доменов вне патча перед записью сверяются с
+  прежними побайтово, кроме `recommended_topics` и `related_domain_topics`.
+- **Согласованность тем.** `has_notes == bool(note_paths)`, каждый `note_path` есть
+  среди файлов домена, каждый файл домена привязан хотя бы к одной теме.
+- **Откат.** Перед записью `taxonomy.json`, `topic-graph.json` и `domain-map.json` скрипт
+  сохраняет `*.before.json` (`taxonomy.before.json`, `topic-graph.before.json`,
+  `domain-map.before.json`). Ручные бэкапы не нужны.
+- **Дрейф кеша.** `semantic-analysis-cache.json` пишется после успешной записи
+  `taxonomy.json`, а не на сборке структуры. Оборванный прогон оставляет кеш прежним.
+
+### Канал LLM
+
+Выбирается один раз за прогон по `llm-ssh test`. Шаги 3, 5 и 6 идут через `llm` (правило 8
+`CLAUDE.md`, `LLM_MODEL=<алиас>` в каждом вызове, см. «Делегирование через llm»), при
+сбое - Agent tool только для этого шага. Песочница чистится один раз (`llm clean`), до
+первого `put`.
+
+### Хелпер llm_send.sh
+
+`scripts/llm_send.sh` (функция `llm_send`) - единственный способ отправить пакет в
+песочницу, ручные циклы в прогонах запрещены:
+
+```bash
+source .claude/skills/semantic-taxonomy/scripts/llm_send.sh
+llm_send --root "$VAULT_PATH" --extra .claude/agents/vault-domain-analyzer.md --extra .claude/temp_files/domain-cards.json
+llm_send --root "$VAULT_PATH" --paths список.txt --extra ТЗ.md
+```
+
+Без `--paths` список строится из `vault-scan.json` (файлы `new | changed`, перевод
+строки LF, без `\r`). Хелпер проверяет уникальность basename (`llm put` кладёт
+плоско, одинаковые имена перезатирают друг друга), отправляет каждый файл с
+`</dev/null 3<&-`, пишет ошибки в `.claude/temp_files/llm_send.log` и сверяет число
+файлов в `llm ls` с ожидаемым. `llm clean` он не вызывает.
+
+### Подводные камни llm
+
+- Список путей без `\r`: текстовый режим Python на Windows пишет `\r\n`, и `llm put`
+  отвечает «Нет такого файла/папки». Пиши `newline="\n"` или `tr -d '\r'`.
+- `llm put` внутри `while read ... <&3` наследует дескриптор 3 со списком: вызывай
+  `llm put "$f" </dev/null 3<&-`. Без `</dev/null` `llm` съедает stdin цикла и цикл
+  завершается с кодом 0.
+- Не глуши вывод (`>/dev/null 2>&1`): без текста ошибки причину не найти. Пиши в лог
+  (`llm_send.log`) и проверяй код возврата.
+- Голый `llm get` кладёт файл относительно текущей папки: забирай через временную папку.
+- Одинаковые basename в разных папках vault перезатирают друг друга - не отправлять.
 
 ---
 
@@ -180,13 +337,22 @@ frontmatter и файлы, состоящие только из вставок �
 (`embed_only`) - синтаксис вставок сам по себе даёт достаточно символов,
 чтобы пройти порог длины, поэтому такие строки вырезаются перед проверкой.
 Затем content-hash сверяется с `semantic-analysis-cache.json`: поле
-`in_cache` показывает архитектору, что заметка не менялась.
+`in_cache` - справочное, источником «что уже в таксономии» оно не служит
+(кеш пишется после `taxonomy.json`, но не хранит путей).
+
+В режиме Incremental хеш файла сверяется с `content_hash` его узла в
+`topic-graph.json`: файла нет в графе - `status: new`, хеш отличается -
+`changed`, совпал - `unchanged`. Нет `topic-graph.json` - прогон полный
+(сверка по кешу невозможна: в нём нет путей). Скан также печатает пути из
+`taxonomy.json`, которых нет в vault (удалённые и переименованные).
 
 Выход: `.claude/temp_files/vault-scan.json` - поля `total_files`,
-`candidate_count`, `cached_count`, `files` (`path`, `folder`, `name`,
-`content_hash`, `in_cache`), `filtered_out`, `mode`.
+`candidate_count`, `cached_count`, `new_count`, `changed_count`,
+`unchanged_count`, `files` (`path`, `folder`, `name`, `content_hash`,
+`in_cache`, `status`), `filtered_out`, `mode`. `status` - единственный
+источник «что нового» для всех следующих шагов.
 
-### Шаг 1.2: Проектирование карты доменов (Agent tool)
+### Шаг 1.2: Проектирование карты доменов (Agent tool или llm)
 
 ### ⚠️ КРИТИЧЕСКИ ВАЖНО: способ вызова
 
@@ -200,8 +366,9 @@ frontmatter и файлы, состоящие только из вставок �
 **ЗАПРЕЩЕНО**: оркестратору самому читать заметки vault или писать
 `domain-map.json`. Это задача только субагента.
 
-Если существующий `domain-map.json` уже есть (инкрементальный прогон) - передай
-его агенту: он расширяет и правит карту, а не изобретает заново.
+В режиме Incremental этот шаг заменён дешёвым пересмотром структуры по
+карточкам доменов (см. «Инкрементальный прогон»): архитектор не получает весь
+vault и не читает старые заметки. Вызов на весь vault - только для Full.
 
 ```python
 Agent({
@@ -218,6 +385,65 @@ Agent({
 проход и запреты живут в `.claude/agents/vault-domain-architect.md`. Оркестратор
 их не дублирует.
 
+### Вариант через llm (если `llm-ssh test` прошёл)
+
+Вместо Agent tool тот же один вызов архитектора выполняет суб-агент `llm`
+(правило 8 `CLAUDE.md`). Результат тот же: `domain-map.json` в
+`.claude/temp_files/`. Если `llm` вернул невалидный JSON или не создал файл -
+fallback на Agent tool (один вызов), остальной прогон не блокируется.
+
+Отправка файлов - только хелпером `scripts/llm_send.sh` (см. «Хелпер llm_send.sh»),
+ручные циклы запрещены. Подводные камни (из-за них шаг 1.2 через `llm` сорвался
+2026-10-17):
+- Список путей, записанный Python на Windows текстовым режимом, содержит
+  `\r\n`. `read -r` оставляет `\r` в пути, и `llm put` отвечает «Нет такого
+  файла/папки», хотя файл есть. Записывай список с `newline="\n"` или
+  прогоняй через `tr -d '\r'`.
+- `llm put` внутри `while read ... <&3` наследует дескриптор 3 со списком.
+  Закрывай его для вызова: `llm put "$f" </dev/null 3<&-`.
+- Не глуши вывод `llm put` (`>/dev/null 2>&1`): без текста ошибки причину не
+  найти. Пиши в лог и проверяй код возврата.
+
+Порядок:
+
+```bash
+llm clean                                             # один раз за прогон, до первого put
+llm ls </dev/null                                     # пусто, кроме . и ..
+```
+
+Отправка: `llm put` кладёт файл под его basename в `/workspace/agent` (плоско,
+без подпапок). Поэтому до отправки проверь, что basename всех путей из
+`vault-scan.json` уникален (`os.path.basename`). Если два файла с одинаковым
+именем в разных папках - не отправляй, остановись и сообщи. Отправь:
+
+```bash
+llm put .claude/temp_files/vault-scan.json </dev/null
+llm put .claude/agents/vault-domain-architect.md </dev/null
+# каждый файл из vault-scan.json["files"][*]["path"] - через список без \r,
+# с 3<&- и с логом ошибок (см. подводные камни выше)
+```
+
+Проверь `llm ls </dev/null`: число файлов = число кандидатов + 2.
+
+Запуск (в фоне, по правилу 11 `CLAUDE.md`):
+
+```bash
+LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию из vault-domain-architect.md. Вход: vault-scan.json, поле files - список кандидатов; их заметки лежат в текущей папке под своими именами. Запиши domain-map.json строго по схеме из инструкции; пути в карте - точно как поле path в скане. В ответе - 5 строк сводки, без JSON." </dev/null
+```
+
+Готовность - файл `domain-map.json` в `llm ls`, а не текст ответа.
+
+Забрать результат и проверить:
+
+```bash
+TMP="$(mktemp -d)"
+(cd "$TMP" && llm get domain-map.json </dev/null) && mv -f "$TMP/domain-map.json" .claude/temp_files/; rm -rf "$TMP"
+```
+
+Далее `python ... collect_vault_structure.py --collect`. Его stderr должен быть
+пустым по части отброшенных путей и пустых `reason`/`suggestion`. Любое
+сообщение там - ошибка архитектора, её нужно исправить до Фазы 2.
+
 ### Шаг 1.3: Сборка структуры
 
 Режим Full:
@@ -225,10 +451,20 @@ Agent({
 python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect
 ```
 
-Режим Incremental:
+Режим Incremental (запускается после применения патча, `apply_domain_patch.py`):
 ```bash
 python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect --new-only
 ```
+
+Дельта определяется по `status` в `vault-scan.json` (`new` и `changed`), а не по
+пути относительно `taxonomy.json`: изменённая заметка с прежним путём не теряется.
+`new_candidates_count` и `new_filtered_count` считаются по тому же признаку.
+
+Контракт `metadata.delta_only: true` (в полном режиме `false`): `domains[].files` и `all_files` -
+только дельта, старые файлы доменов берутся из `taxonomy.json`. `--merge`, `--verify` и
+`build_topic_graph.py` отказываются работать при `mode=incremental` без этого флага (рассинхрон
+версий) - перезапусти `--collect --new-only`. В инкременте `--verify` сверяет пути со всем
+`vault-scan.json` (`files` и `filtered_out`), а удалённые старые файлы дают WARN.
 
 Читает `vault-scan.json` + `domain-map.json`, строит
 `path -> domain -> topic`, обновляет кеш
@@ -282,17 +518,16 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
   - Анализировать **ВСЕ** домены из `vault-structure-analysis.json`
   - Игнорировать `graph-dirty-domains.json` если он существует
 
-- **Режим `--merge`** (или Incremental в интерактивном выборе):
-  - Проверить существует ли файл `.claude/temp_files/graph-dirty-domains.json` (результат Фазы 1.4)
-  - Если файл **существует и `dirty_domains` не пуст**:
-    ```bash
-    python3 -c "import json; d=json.load(open('.claude/temp_files/graph-dirty-domains.json')); print('dirty_domains:', d.get('dirty_domains', []))"
-    ```
-    → Анализировать **только эти домены** (ускорение, пересчитаны только изменённые)
-  - Если файл **отсутствует или `dirty_domains` пуст**:
-    → **Пропустить Фазу 2 целиком**, перейти сразу к Фазе 1.4 (если не запущена) и затем Фазы 3-6
+- **Режим Incremental** (`--merge`):
+  - Граф к Фазе 2 ещё не строился (он идёт после Фаз 2, 3 и 3б), поэтому
+    `graph-dirty-domains.json` здесь не источник. Домены для анализа - из
+    `affected-domains.json` (результат `apply_domain_patch.py`) и доменов, куда
+    попали файлы `new | changed` из `vault-scan.json`.
+  - Агент работает в режиме «добавление»: читает только файлы дельты, остальные
+    записи домена берёт из `taxonomy.json`. Домены без дельты не анализируются.
+  - Дельты нет (нет `new | changed`) - Фаза 2 и 3б пропускаются.
 
-**Зачем**: в incremental режиме не переанализируем домены, где ничего не изменилось — экономия времени и токенов.
+**Зачем**: в incremental режиме глубоко читаются только новые и изменённые заметки - экономия времени и токенов.
 
 ### Инструмент
 
@@ -313,7 +548,7 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 
 Чек-лист перед началом Фазы 2 (пройди мысленно, прежде чем делать что-либо ещё):
 1. Я проверил режим (full vs merge) и определил список доменов? Если нет — стоп.
-2. Если merge-режим: я проверил `graph-dirty-domains.json` и отсеял non-dirty домены? 
+2. Если Incremental: я взял домены из `affected-domains.json` и доменов с файлами `new | changed` и включил режим «добавление»?
 3. Я собираюсь вызвать инструмент **Agent**, а не Read/Write? Если нет — стоп.
 4. У вызова указан `subagent_type: "vault-domain-analyzer"`?
 5. Все (отфильтрованные) домены отправлены одним сообщением, параллельно?
@@ -327,12 +562,26 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 Домены обрабатываются последовательно (песочница `llm` — одна сессия). Для
 каждого домена:
 
-Модель песочницы передаётся динамически: каждый вызов `llm` идёт с префиксом
-`LLM_MODEL=<модель, с которой работает оркестратор>`. Значение - один из алиасов
-`opus | sonnet | haiku` (проверено на песочнице: `sonnet` и `opus` принимаются
-без предупреждений, `haiku` отвечает, но пишет `unrecognized_model`; полные ID
-вроде `claude-haiku-5-5` тоже дают предупреждение). Если `LLM_MODEL` не задан,
-`llm` берёт модель из `~/.llm/config` или использует дефолт песочницы.
+Модель песочницы передаётся явно: каждый вызов `llm` идёт с префиксом
+`LLM_MODEL=<алиас>`. Алиас определяет оркестратор сам, по своему ID модели из
+системного промпта (поле «exact model ID»), по семейству:
+
+| ID оркестратора | `LLM_MODEL` |
+|---|---|
+| `claude-opus-*` | `opus` |
+| `claude-sonnet-*` | `sonnet` |
+| `claude-haiku-*` | `haiku` |
+
+Правила:
+- Алиас определяется заново перед каждым вызовом `llm`: модель могла смениться
+  командой `/model` в середине сессии.
+- Полный ID (`claude-sonnet-5-5`) не передавать: песочница выдаёт предупреждение.
+  Проверено: `sonnet` и `opus` принимаются без предупреждений, `haiku` отвечает,
+  но пишет `unrecognized_model`.
+- Семейство не из таблицы (например `fable`) - не угадывать и не подставлять
+  дефолт: остановиться и спросить пользователя, какой алиас использовать.
+- Без `LLM_MODEL` `llm` берёт модель из `~/.llm/config` или дефолт песочницы -
+  так не делать. Исключение: `llm clean` и `llm-ssh test`, им модель не нужна.
 
 Перед передачей файлов прогона песочница полностью очищается (старые результаты
 прошлых прогонов иначе попадают в выборку). Очистка выполняется один раз за
@@ -352,12 +601,19 @@ TMP="$(mktemp -d)"                                    # забрать резу�
 (cd "$TMP" && llm get llm-phase2/{domain_id}-analysis.json </dev/null) && mv -f "$TMP/llm-phase2/{domain_id}-analysis.json" .claude/temp_files/; rm -rf "$TMP"
 ```
 
+Очистка песочницы (`llm clean`) выполняется один раз за прогон, до первого
+`llm put`. Если шаг 1.2 уже шёл через `llm` в этом прогоне - повторно не
+делай, иначе стираются результаты прошлых вызовов этого же прогона.
+
 Правила для циклов с `llm` (нарушение этих правил уже ломало прогон):
 - Каждый вызов `llm` получает `</dev/null`. Без этого `llm` читает stdin и
   съедает оставшийся список доменов цикла, при этом цикл завершается с кодом 0.
 - Список доменов читается через отдельный дескриптор (`while read ... <&3; done 3< список`).
 - Файлы забираются только через `llm get` во временной папке (блок выше): голый `llm get` кладёт файл
   относительно текущей папки, то есть в корень проекта.
+- Не писать вывод вызова `llm` в файлы-логи в `.claude/temp_files/` (вроде
+  `_p2_{domain_id}.log`): ни один скрипт их не читает. Сводку и ошибку возвращает
+  сам фоновый вызов, готовность - по `{domain_id}-analysis.json`, а не по логу.
 - После цикла проверить, что есть все `{domain_id}-analysis.json` и что JSON
   валиден с полем `domain_summary`. Для недостающих доменов - fallback через
   Agent tool.
@@ -424,8 +680,8 @@ for domain in domains:
 ## Фаза 1.4: Обновление графа тем и доменов
 
 Добавлена фичей `003-incremental-progress-graph`. Выполняется после Фазы 2
-(или сразу после шага 1.3 в incremental-режиме, если Фаза 2 для новых файлов
-не запускалась — см. ниже), перед Фазами 3-6.
+(в incremental-режиме - после Фаз 2, 3 и 3б строго; если дельты нет и Фазы 2/3б
+пропущены, то сразу после шага 1.3), перед Фазами 3-6.
 
 ### Команды
 
@@ -447,7 +703,8 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
    привязанных к теме: по `taxonomy.json` прошлых прогонов или, пока тем в `taxonomy.json`
    нет (первый прогон), по `vault-structure-analysis.json` (`domains[].topics[].note_paths`).
 2. Новые файлы помечают только свой домен как **dirty**; изменившиеся помечают домен и,
-   если их тема известна, тему. Список пишется в
+   если их тема известна, тему. В инкременте к dirty добавляются затронутые домены
+   (`affected-domains.json`) и оба домена переехавшего файла. Список пишется в
    `.claude/temp_files/graph-dirty-domains.json` (одноразовый артефакт этого прогона,
    вход для Фаз 3-6). Поэтому на первом прогоне `dirty_topics` пуст: все файлы новые.
 3. Ревизия графа инкрементируется, история пишется в
@@ -465,14 +722,15 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
    без него получает `not_derived`.
 6. Рёбра `related` скрипт не выводит: их создаёт только `vault-relevance-finder` (см. ниже).
 
-**Важно про новые файлы**: essence/key_concepts для только что добавленной
-заметки берутся из классификации шага 1.2 (`semantic-analysis-cache.json`),
-**не** из полноценного `vault-domain-analyzer` — `vault-domain-analyzer`
-по-прежнему вызывается только на Фазе 2 для реально новых/изменившихся
-доменов, если нужен глубокий анализ их файлов целиком. Если для домена не
-было причины запускать Фазу 2 (например, единственная новая заметка не
-требует полного переанализа домена), узел графа для неё всё равно строится —
-просто с более лёгким источником essence/key_concepts.
+**Важно про новые файлы**: в инкременте у каждого домена с дельтой обязан быть свежий
+`{domain_id}-analysis.json` (режим «добавление»), у затронутого домена -
+`{domain_id}-topics.validated.json` (Фаза 3б). Иначе граф не строится (см. «Коды выхода»).
+Essence/key_concepts дельты берутся из этого анализа, а не из кеша классификации.
+Старые узлы и рёбра сохраняются: узлы и `member_of` перестраиваются из актуальной
+раскладки (в том числе для переехавших файлов), `dependency` сохраняются, у изменённых
+файлов исходящие `dependency` пересобираются. Переименование и слияние доменов
+применяются к узлам по `domain-merge-map.json`. `related` между доменами после
+перестановки перепроверяются с предупреждением.
 
 ### Поиск related/dependencies для новых файлов
 
@@ -544,24 +802,28 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py --apply-rel
 python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py
 ```
 
-Режим Incremental (мёржить с существующей, сужено до dirty-доменов из Фазы 1.4):
+Режим Incremental (без LLM: раскладка из `domain-map.json`, затронутые домены из
+`affected-domains.json`, темы из `{domain_id}-topics.validated.json`, дельта из
+`{domain_id}-analysis.json`):
 ```bash
 python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --merge
 ```
 
 Режим Incremental с полным пересчётом прогресса всех доменов (игнорирует
 dirty-фильтр графа, но по-прежнему мёржит, а не пересобирает `taxonomy.json`
-с нуля):
+с нуля); `--merge --dry-run` проверяет инварианты, ничего не записывая:
 ```bash
 python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --merge --full
 ```
 
-Скрипт выполняет фазы 3-6 последовательно внутри себя. В режиме `--merge` без
-`--full`, если на этом прогоне был создан `.claude/temp_files/graph-dirty-domains.json`,
-пересчёт Фаз 3-5 сужается до доменов из `dirty_domains` — остальные секции
-`taxonomy.json` остаются побайтово нетронутыми. Если `dirty_domains` пуст —
-скрипт завершается без изменений `taxonomy.json` (аналогично проверке Фазы 1
-"новых файлов нет").
+Скрипт выполняет фазы 3-6 последовательно внутри себя. В режиме `--merge`
+`files` каждого домена собираются из актуальной раскладки (старые записи из
+`taxonomy.json`, в том числе переехавшие, плюс записи дельты), поэтому
+`global_facets`, `paradigms`, статистика и learning paths пересчитываются без
+анализа старых файлов. Запись затронутого домена заменяется, темы берутся из
+Фазы 3б. Незатронутые домены остаются без изменений, кроме производных полей
+`recommended_topics` и `related_domain_topics` (пересчитываются по всем доменам,
+порог рекомендации `RECOMMENDATION_MASTERY_THRESHOLD = 50`).
 
 ---
 
@@ -688,11 +950,14 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 ## Ограничения режима Incremental
 
 Режим Incremental не отслеживает:
-- Удаленные файлы из vault (останутся в taxonomy.json)
+- Удаленные файлы из vault (останутся в taxonomy.json; скан печатает такие пути, `files_exist` даёт WARN)
 - Переименованные файлы (появятся как новые)
-- Перемещённые файлы между доменами
 
-Для полной синхронизации используйте режим Full.
+Изменённые заметки (другой хеш при том же пути) отслеживаются: они входят в дельту.
+Перемещение между доменами делает архитектор патчем (`move_topic`, `add_file`), без
+чтения старых текстов. Без `topic-graph.json` дельту определить нечем - прогон полный.
+
+Для полной синхронизации (удаления, сомнения в целостности) используйте режим Full.
 
 ---
 
@@ -706,6 +971,8 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 **Промежуточные файлы** (удаляются на Фазе 6):
 - vault-scan.json
 - domain-merge-map.json (если карта менялась)
+- domain-cards.json, patch.json, affected-domains.json, reassess-input/, {domain}-topics.json, {domain}-topics.validated.json
+- *.before.json (откат; перед очисткой убедись, что прогон принят)
 - vault-structure-analysis.json
 - {domain}-analysis.json
 - graph-dirty-domains.json

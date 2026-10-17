@@ -9,9 +9,17 @@ spec.md Q2). Diff поверх существующего графа опред�
 Режимы:
   --full    : построить граф с нуля (игнорировать существующий topic-graph.json)
   (по умолчанию): инкрементальный diff поверх существующего графа
+  --dry-run : выполнить все проверки и показать итог, ничего не записывая
+  --temp-dir <путь> : папка temp_files (по умолчанию .claude/temp_files проекта)
+
+Инкремент (Фаза 4 плана): перед работой проверяются входы (анализ домена с дельтой
+и validated-темы затронутых доменов не старше vault-scan.json), старые узлы и рёбра
+сохраняются, домены переименовываются/сливаются по domain-merge-map.json, цикл
+dependency с ребром дельты и расхождение файлов графа с taxonomy.json - FAIL (код 1).
 """
 
 import json
+import shutil
 import sys
 import io
 from pathlib import Path
@@ -183,7 +191,8 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
                      domain_analyses: dict, semantic_cache: dict,
                      path_to_topic: dict, next_revision: int,
                      taxonomy_files_by_path: dict,
-                     known_in_taxonomy: set = None) -> dict:
+                     known_in_taxonomy: set = None,
+                     scan_status: dict = None) -> dict:
     """
     Построить/обновить узел kind="file". Источник essence/key_concepts/title/type
     (data-model.md, Node kind = "file"):
@@ -202,6 +211,14 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
     known_paths = path_to_topic if known_in_taxonomy is None else known_in_taxonomy
     is_new = existing_node is None and path not in known_paths
     is_changed = (not is_new) and existing_node and content_hash and existing_node.get("content_hash") != content_hash
+    # Инкремент: единственный источник "что нового" - status из vault-scan.json
+    status = (scan_status or {}).get(path)
+    if status in DELTA_STATUSES:
+        is_new = status == "new"
+        is_changed = status == "changed"
+    elif status == "unchanged":
+        is_new = False
+        is_changed = False
 
     analysis_entry = domain_analyses.get(domain_id, {}).get(path)
     mentions = None  # упоминания другим файлам, хранятся в узле как есть (Фаза 1)
@@ -251,6 +268,9 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
         topic_id = composite_topic_id(domain_id, topic_ref[1])
     elif existing_node:
         topic_id = existing_node.get("topic_id")
+        # файл переехал в другой домен: тема прежнего домена к нему не относится
+        if topic_id and not str(topic_id).startswith(domain_id + "::"):
+            topic_id = None
     else:
         topic_id = None
 
@@ -270,11 +290,14 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
     return node, is_new, is_changed
 
 
-def build_graph_state(temp_dir: Path, graph: dict):
+def build_graph_state(temp_dir: Path, graph: dict, ctx: dict = None):
     """
     Построить обновлённое состояние узлов/рёбер graph на основе текущего
     vault-structure-analysis.json + источников из load_new_domain_analyses/
     load_path_hash_map/load_path_to_topic (T004, T005).
+
+    ctx - контекст инкремента (prepare_incremental): раскладка доменов, status из
+    vault-scan.json и merge-map. Без него работает прежняя логика (структура или taxonomy).
 
     Возвращает (new_nodes, new_edges, new_domains, new_file_ids, changed_file_ids,
     dirty_domains, dirty_topics).
@@ -286,7 +309,17 @@ def build_graph_state(temp_dir: Path, graph: dict):
     domain_analyses = load_new_domain_analyses(temp_dir)
     path_to_topic = load_path_to_topic(taxonomy)
     known_in_taxonomy = set(path_to_topic)
-    if not path_to_topic:
+    scan_status = None
+    if ctx:
+        merge_map = ctx["merge_map"]
+        scan_status = ctx["scan_status"]
+        # taxonomy.json ещё со старыми id доменов: приводим к актуальным
+        path_to_topic = {p: (resolve_domain_id(d, merge_map), t) for p, (d, t) in path_to_topic.items()}
+        known_in_taxonomy = set(path_to_topic)
+        # файлы дельты в taxonomy.json нет: тему берём из структуры, не перекрывая taxonomy.json
+        for path, (domain_id, topic_id) in load_path_to_topic_from_structure(vault_structure).items():
+            path_to_topic.setdefault(path, (resolve_domain_id(domain_id, merge_map), topic_id))
+    elif not path_to_topic:
         # Фаза 4 (вариант б): на первом прогоне taxonomy.json ещё без тем -
         # темы берём из vault-structure-analysis.json (domains[].topics[].note_paths)
         path_to_topic = load_path_to_topic_from_structure(vault_structure)
@@ -318,8 +351,8 @@ def build_graph_state(temp_dir: Path, graph: dict):
     dirty_domains = set()
     dirty_topics = set()
 
-    domain_entries = vault_structure.get("domains", [])
-    if not domain_entries:
+    domain_entries = ctx["domain_entries"] if ctx else vault_structure.get("domains", [])
+    if not ctx and not domain_entries:
         # vault-structure-analysis.json отсутствует (например, удалён cleanup.py) -
         # fallback: список доменов/файлов берём напрямую из taxonomy.json.
         domain_entries = taxonomy.get("domains", [])
@@ -337,6 +370,7 @@ def build_graph_state(temp_dir: Path, graph: dict):
                 path, domain_id, content_hash, existing_node,
                 domain_analyses, semantic_cache, path_to_topic, next_revision,
                 taxonomy_files_by_path, known_in_taxonomy=known_in_taxonomy,
+                scan_status=scan_status,
             )
             new_nodes[path] = node
             domain_member_files[domain_id].append(path)
@@ -478,13 +512,11 @@ def validate_graph(graph: dict) -> list:
     return warnings
 
 
-def has_dependency_cycle(graph: dict) -> list:
+def find_dependency_cycles(graph: dict) -> list:
     """
-    Проверить отсутствие циклов в рёбрах type="dependency" (data-model.md, Validation
-    rules для Graph Edge). Проверка идёт по всему графу: цикл внутри одного домена
-    находится, и цикл через несколько доменов тоже - зависимости между доменами
-    возникают при резолве basename. Возвращает список строк с найденными циклами
-    (не фатально - логируется, см. T019).
+    Найти циклы в рёбрах type="dependency". Возвращает список циклов, каждый - список
+    node_id с замыканием в конце: [a, b, a]. Обход итеративный (глубина не ограничена
+    лимитом рекурсии), в цикл попадают только узлы самого цикла, без пути до него.
     """
     nodes = graph.get("nodes", {})
     adjacency = {}
@@ -495,24 +527,42 @@ def has_dependency_cycle(graph: dict) -> list:
             continue
         adjacency.setdefault(edge["source"], []).append(edge["target"])
 
-    issues = []
+    cycles = []
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {}
+    for root in list(adjacency.keys()):
+        if color.get(root, WHITE) != WHITE:
+            continue
+        color[root] = GRAY
+        path = [root]
+        stack = [iter(adjacency.get(root, []))]
+        while stack:
+            advanced = False
+            for nxt in stack[-1]:
+                state = color.get(nxt, WHITE)
+                if state == GRAY:
+                    cycles.append(path[path.index(nxt):] + [nxt])
+                elif state == WHITE:
+                    color[nxt] = GRAY
+                    path.append(nxt)
+                    stack.append(iter(adjacency.get(nxt, [])))
+                    advanced = True
+                    break
+            if not advanced:
+                color[path.pop()] = BLACK
+                stack.pop()
+    return cycles
 
-    def visit(node, path):
-        color[node] = GRAY
-        for nxt in adjacency.get(node, []):
-            if color.get(nxt, WHITE) == GRAY:
-                issues.append(f"Цикл dependency: {' -> '.join(path + [nxt])}")
-            elif color.get(nxt, WHITE) == WHITE:
-                visit(nxt, path + [nxt])
-        color[node] = BLACK
 
-    for node in list(adjacency.keys()):
-        if color.get(node, WHITE) == WHITE:
-            visit(node, [node])
-
-    return issues
+def has_dependency_cycle(graph: dict) -> list:
+    """
+    Проверить отсутствие циклов в рёбрах type="dependency" (data-model.md, Validation
+    rules для Graph Edge). Проверка идёт по всему графу: цикл внутри одного домена
+    находится, и цикл через несколько доменов тоже - зависимости между доменами
+    возникают при резолве basename. Возвращает список строк с найденными циклами
+    (в полном режиме не фатально - логируется, см. T019).
+    """
+    return ["Цикл dependency: " + " -> ".join(c) for c in find_dependency_cycles(graph)]
 
 
 # === Dirty-domains артефакт (T006) ===
@@ -856,6 +906,375 @@ def collect_relevance_required(new_file_ids: list, new_nodes: dict, domain_analy
     return required
 
 
+# === Инкремент (Фаза 4 плана): контракт входов, раскладка, сверка ===
+
+SCAN_FILENAME = "vault-scan.json"
+MERGE_MAP_FILENAME = "domain-merge-map.json"
+AFFECTED_FILENAME = "affected-domains.json"
+DELTA_STATUSES = ("new", "changed")
+# Файлы, которые перезаписываются скриптом: перед записью - копия *.before.json
+BACKUP_FILENAMES = ("topic-graph.json", "graph-dirty-domains.json", "graph-revision-log.json")
+
+
+def resolve_domain_id(domain_id, merge_map: dict):
+    """Актуальный id домена по domain-merge-map.json (цепочки a->b->c сворачиваются)."""
+    seen = set()
+    while domain_id in merge_map and domain_id not in seen:
+        seen.add(domain_id)
+        domain_id = merge_map[domain_id]
+    return domain_id
+
+
+def remap_topic_id(topic_id, merge_map: dict):
+    """Составной id темы 'домен::тема' с актуальным id домена."""
+    if not isinstance(topic_id, str) or "::" not in topic_id:
+        return topic_id
+    domain_id, local = topic_id.split("::", 1)
+    return resolve_domain_id(domain_id, merge_map) + "::" + local
+
+
+def apply_merge_map_to_graph(graph: dict, merge_map: dict) -> int:
+    """
+    Переименование и слияние доменов в графе по domain-merge-map.json: узлы доменов и тем
+    получают новые id, у файлов меняются domain_id/topic_id, рёбра переадресуются
+    (дубликаты после слияния схлопываются), graph["domains"] переименовывается.
+    dependency между файлами не меняются: id файлов прежние. member_of пересобираются
+    позже из раскладки. Возвращает число переименованных/слитых узлов доменов.
+    """
+    if not merge_map:
+        return 0
+    nodes = graph.get("nodes", {})
+    id_map = {}
+    for node_id, node in nodes.items():
+        if node.get("kind") == "domain":
+            new_id = resolve_domain_id(node_id, merge_map)
+        elif node.get("kind") == "topic":
+            new_id = remap_topic_id(node_id, merge_map)
+        else:
+            continue
+        if new_id != node_id:
+            id_map[node_id] = new_id
+
+    new_nodes = {}
+    for node_id, node in nodes.items():
+        new_id = id_map.get(node_id, node_id)
+        if new_id in new_nodes:
+            # слияние: остаётся один узел, прогресс - максимальный из слитых
+            kept = new_nodes[new_id]
+            kept["last_progress_revision"] = max(kept.get("last_progress_revision", 0),
+                                                 node.get("last_progress_revision", 0))
+            continue
+        node = dict(node)
+        node["node_id"] = new_id
+        if node.get("kind") == "file":
+            node["domain_id"] = resolve_domain_id(node.get("domain_id"), merge_map)
+            node["topic_id"] = remap_topic_id(node.get("topic_id"), merge_map)
+        elif node.get("kind") == "topic":
+            node["parent_domain_id"] = resolve_domain_id(node.get("parent_domain_id"), merge_map)
+        new_nodes[new_id] = node
+
+    new_edges = []
+    seen = set()
+    for edge in graph.get("edges", []):
+        edge = dict(edge)
+        edge["source"] = id_map.get(edge.get("source"), edge.get("source"))
+        edge["target"] = id_map.get(edge.get("target"), edge.get("target"))
+        key = (edge["source"], edge["target"], edge.get("type"))
+        if key in seen:
+            continue
+        seen.add(key)
+        new_edges.append(edge)
+
+    new_domains = {}
+    for domain_id, info in (graph.get("domains") or {}).items():
+        new_id = resolve_domain_id(domain_id, merge_map)
+        kept = new_domains.get(new_id)
+        if kept is None:
+            new_domains[new_id] = info
+        elif (isinstance(kept, dict) and isinstance(info, dict)
+              and info.get("relations_status") == "derived"):
+            kept["relations_status"] = "derived"
+
+    graph["nodes"] = new_nodes
+    graph["edges"] = new_edges
+    graph["domains"] = new_domains
+    return len([1 for old_id in id_map if nodes[old_id].get("kind") == "domain"])
+
+
+def section_items(section) -> list:
+    """Записи секции projects/unclassified: {"items": [...]} или просто список."""
+    if isinstance(section, dict):
+        section = section.get("items")
+    return [x for x in (section or []) if isinstance(x, dict)]
+
+
+def off_domain_paths_of(data: dict) -> set:
+    """Пути файлов из projects и unclassified (вне доменов) в structure или taxonomy."""
+    paths = set()
+    for project in section_items((data or {}).get("projects")):
+        paths.update(p for p in project.get("files", []) or [] if isinstance(p, str))
+    for entry in section_items((data or {}).get("unclassified")):
+        if isinstance(entry.get("path"), str):
+            paths.add(entry["path"])
+    return paths
+
+
+def entry_path(entry):
+    """Путь файла из записи files (dict с path или строка)."""
+    if isinstance(entry, dict):
+        entry = entry.get("path")
+    return entry if isinstance(entry, str) else None
+
+
+def build_layout(graph: dict, taxonomy: dict, structure: dict, merge_map: dict,
+                 affected_ids: set) -> dict:
+    """
+    Актуальная раскладка файлов по доменам. Источники по возрастанию приоритета:
+      1. узлы прежнего графа (уже с переименованными доменами) - старые файлы;
+      2. taxonomy.json (id доменов через merge-map): для файлов, которых нет в графе, и
+         для затронутых доменов (affected-domains.json) - старые файлы, в т.ч. переехавшие;
+      3. vault-structure-analysis.json: дельта и всё, что структура разложила заново.
+    Файлы из projects/unclassified структуры в графе не нужны (кроме явного конфликта с
+    доменом: домен главнее). Возвращает {"entries", "placement", "off_domain", "moved"}.
+    """
+    placement = {}
+    domain_order = []
+    for node_id, node in graph.get("nodes", {}).items():
+        if node.get("kind") == "domain":
+            domain_order.append(node_id)
+        elif node.get("kind") == "file" and node.get("domain_id"):
+            placement[node_id] = node["domain_id"]
+    old_placement = dict(placement)
+
+    for domain in (taxonomy or {}).get("domains", []) or []:
+        domain_id = resolve_domain_id(domain.get("domain_id"), merge_map)
+        if not domain_id:
+            continue
+        domain_order.append(domain_id)
+        for f in domain.get("files", []) or []:
+            path = entry_path(f)
+            if path and (path not in placement or domain_id in affected_ids):
+                placement[path] = domain_id
+
+    structure_paths = set()
+    structure_domains = []
+    for domain in (structure or {}).get("domains", []) or []:
+        domain_id = resolve_domain_id(domain.get("domain_id"), merge_map)
+        if not domain_id:
+            continue
+        structure_domains.append(domain_id)
+        domain_order.append(domain_id)
+        for f in domain.get("files", []) or []:
+            path = entry_path(f)
+            if path:
+                placement[path] = domain_id
+                structure_paths.add(path)
+
+    off_domain = off_domain_paths_of(structure) - structure_paths
+    for path in off_domain:
+        placement.pop(path, None)
+
+    moved = {p: (old_placement[p], d) for p, d in placement.items()
+             if p in old_placement and old_placement[p] != d}
+
+    members = {}
+    for path, domain_id in placement.items():
+        members.setdefault(domain_id, []).append(path)
+    entries = []
+    seen = set()
+    for domain_id in domain_order + sorted(members):
+        if domain_id in seen or (domain_id not in members and domain_id not in structure_domains):
+            continue
+        seen.add(domain_id)
+        entries.append({"domain_id": domain_id,
+                        "files": [{"path": p} for p in members.get(domain_id, [])]})
+    return {"entries": entries, "placement": placement, "off_domain": off_domain, "moved": moved}
+
+
+def expected_file_ids(taxonomy: dict, structure: dict, delta_ids: set, off_domain: set) -> set:
+    """
+    Файловые узлы, которые должны быть в графе: файлы доменов taxonomy.json плюс дельта,
+    минус файлы projects/unclassified. Файл из taxonomy.unclassified/projects, который
+    структура теперь кладёт в домен (classify), тоже ожидается в графе.
+    """
+    expected = set()
+    for domain in (taxonomy or {}).get("domains", []) or []:
+        for f in domain.get("files", []) or []:
+            path = entry_path(f)
+            if path:
+                expected.add(path)
+    expected |= set(delta_ids)
+    structure_files = {entry_path(f) for d in (structure or {}).get("domains", []) or []
+                       for f in d.get("files", []) or []}
+    expected |= off_domain_paths_of(taxonomy) & structure_files
+    return expected - off_domain
+
+
+def check_inputs(temp_dir: Path, delta_by_domain: dict, affected_ids) -> list:
+    """
+    Контракт входов Фазы 4: у домена с файлами new|changed должен быть {domain_id}-analysis.json,
+    у затронутого домена - {domain_id}-topics.validated.json, оба не старше vault-scan.json.
+    Возвращает список сообщений об ошибках (пусто - входы в порядке).
+    """
+    errors = []
+    scan_mtime = (temp_dir / SCAN_FILENAME).stat().st_mtime
+    for domain_id in sorted(delta_by_domain):
+        name = domain_id + "-analysis.json"
+        path = temp_dir / name
+        count = len(delta_by_domain[domain_id])
+        if not path.exists():
+            errors.append("Домен " + domain_id + ": есть файлы new|changed (" + str(count) +
+                          "), но нет " + name + " (Фаза 3 не выполнена)")
+        elif path.stat().st_mtime < scan_mtime:
+            errors.append("Домен " + domain_id + ": " + name + " старше " + SCAN_FILENAME +
+                          " (анализ устарел, файлов new|changed: " + str(count) + ")")
+    for domain_id in sorted(affected_ids):
+        name = domain_id + "-topics.validated.json"
+        path = temp_dir / name
+        if not path.exists():
+            errors.append("Затронутый домен " + domain_id + ": нет " + name + " (Фаза 3б не выполнена)")
+        elif path.stat().st_mtime < scan_mtime:
+            errors.append("Затронутый домен " + domain_id + ": " + name + " старше " + SCAN_FILENAME)
+    return errors
+
+
+def check_delta_contract(metadata) -> list:
+    """
+    Контракт delta_only (collect_vault_structure.py): в инкременте domains[].files и all_files -
+    только дельта. Возвращает список ошибок; пустой/нечитаемый metadata - без ошибок
+    (структуры может не быть). Копия функции из synthesize_taxonomy.py: модули независимы.
+    """
+    if not isinstance(metadata, dict) or not metadata:
+        return []
+    errors = []
+    mode = metadata.get("mode")
+    delta_only = metadata.get("delta_only")
+    if mode == "incremental" and delta_only is not True:
+        errors.append("mode=incremental без delta_only: рассинхрон версий collect и synthesize, "
+                      "перезапусти --collect --new-only")
+    if delta_only is True and mode != "incremental":
+        errors.append("противоречие: delta_only=true, а mode=" + str(mode) + " (ожидался incremental)")
+    return errors
+
+
+def prepare_incremental(temp_dir: Path, graph: dict):
+    """
+    Подготовка инкремента: прочитать входы, применить merge-map к графу (на месте), собрать
+    раскладку, проверить контракт входов. Возвращает (ctx, errors); при errors граф не строится.
+    """
+    scan_path = temp_dir / SCAN_FILENAME
+    if not scan_path.exists():
+        return None, ["Нет " + SCAN_FILENAME + ": сначала --scan (для сборки с нуля есть --full)"]
+    scan = load_json(scan_path, None)
+    files = scan.get("files") if isinstance(scan, dict) else None
+    if not isinstance(files, list):
+        return None, [SCAN_FILENAME + " не читается или без списка files"]
+    scan_status = {e["path"]: e.get("status") for e in files
+                   if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    if any(st not in ("new", "changed", "unchanged") for st in scan_status.values()):
+        return None, [SCAN_FILENAME + ": у файлов нет status new|changed|unchanged (перезапустите --scan)"]
+
+    merge_map = load_json(temp_dir / MERGE_MAP_FILENAME, {}) or {}
+    if not isinstance(merge_map, dict):
+        merge_map = {}
+    affected_raw = load_json(temp_dir / AFFECTED_FILENAME, None)
+    affected_ids = None
+    if isinstance(affected_raw, dict):
+        affected_ids = {resolve_domain_id(d.get("domain_id"), merge_map)
+                        for d in affected_raw.get("domains", []) or []
+                        if isinstance(d, dict) and d.get("domain_id")}
+
+    renamed = apply_merge_map_to_graph(graph, merge_map)
+    if renamed:
+        print("[INFO] Домены переименованы/слиты по " + MERGE_MAP_FILENAME + ": " + str(renamed),
+              file=sys.stderr)
+
+    taxonomy = load_json(temp_dir / "taxonomy.json", {}) or {}
+    structure = load_json(temp_dir / "vault-structure-analysis.json", {}) or {}
+    layout = build_layout(graph, taxonomy, structure, merge_map, affected_ids or set())
+
+    delta_ids = {p for p, st in scan_status.items() if st in DELTA_STATUSES}
+    delta_by_domain = {}
+    for path in sorted(delta_ids):
+        domain_id = layout["placement"].get(path)
+        if domain_id:
+            delta_by_domain.setdefault(domain_id, []).append(path)
+
+    for path in sorted(p for p in layout["placement"] if p not in scan_status):
+        print("[WARN] Файл раскладки отсутствует в " + SCAN_FILENAME + ": " + path, file=sys.stderr)
+
+    errors = check_inputs(temp_dir, delta_by_domain, affected_ids or set())
+    if isinstance(structure, dict) and structure:
+        errors.extend("Контракт delta_only: " + e for e in check_delta_contract(structure.get("metadata")))
+    ctx = {
+        "domain_entries": layout["entries"],
+        "scan_status": scan_status,
+        "merge_map": merge_map,
+        "affected_ids": affected_ids or set(),
+        "delta_ids": delta_ids,
+        "moved": layout["moved"],
+        "expected": expected_file_ids(taxonomy, structure, delta_ids, layout["off_domain"]),
+        "has_taxonomy": bool(taxonomy.get("domains")),
+    }
+    return ctx, errors
+
+
+def check_related_domains(graph: dict) -> list:
+    """
+    related-рёбра после перестановки: ребро между разными доменами перепроверяется
+    (relevance-finder строит related внутри домена). Возвращает предупреждения, рёбра не меняются.
+    """
+    nodes = graph.get("nodes", {})
+
+    def domain_of(node_id):
+        node = nodes.get(node_id) or {}
+        if node.get("kind") == "domain":
+            return node_id
+        return node.get("domain_id") or node.get("parent_domain_id")
+
+    warnings = []
+    for edge in graph.get("edges", []):
+        if edge.get("type") != "related":
+            continue
+        d_src, d_dst = domain_of(edge.get("source")), domain_of(edge.get("target"))
+        if d_src and d_dst and d_src != d_dst:
+            warnings.append("related между доменами после перестановки: " + str(edge["source"]) +
+                            " (" + str(d_src) + ") -> " + str(edge["target"]) + " (" + str(d_dst) + ")")
+    return warnings
+
+
+def split_cycles_by_delta(graph: dict, cycles: list):
+    """
+    Разделить циклы: (дельты, старые). Ребро дельты - dependency, добавленное в этом прогоне
+    (added_in_revision == revision + 1: новые файлы и пересобранные у изменённых).
+    """
+    next_revision = graph.get("revision", 0) + 1
+    revision_of = {(e.get("source"), e.get("target")): e.get("added_in_revision")
+                   for e in graph.get("edges", []) if e.get("type") == "dependency"}
+    delta_cycles, old_cycles = [], []
+    for cycle in cycles:
+        is_delta = any(revision_of.get((a, b)) == next_revision for a, b in zip(cycle, cycle[1:]))
+        (delta_cycles if is_delta else old_cycles).append(cycle)
+    return delta_cycles, old_cycles
+
+
+def reconcile_file_nodes(graph: dict, expected: set):
+    """Сверка файловых узлов графа с ожидаемым множеством: (нет в графе, лишние в графе)."""
+    actual = {nid for nid, n in graph.get("nodes", {}).items() if n.get("kind") == "file"}
+    return sorted(expected - actual), sorted(actual - expected)
+
+
+def backup_before_write(temp_dir: Path) -> list:
+    """Копия перезаписываемых файлов в *.before.json (откат без ручных бэкапов)."""
+    saved = []
+    for name in BACKUP_FILENAMES:
+        src = temp_dir / name
+        if src.exists():
+            shutil.copy2(src, temp_dir / (src.stem + ".before.json"))
+            saved.append(src.stem + ".before.json")
+    return saved
+
+
 # === Точки входа для vault-relevance-finder (Фаза 2) ===
 
 def read_flag_value(flag: str):
@@ -940,10 +1359,12 @@ def run_apply_relevance(temp_dir: Path, results_path: Path) -> int:
 
 def main():
     full_mode = "--full" in sys.argv
+    dry_run = "--dry-run" in sys.argv
 
     try:
         requests_out = read_flag_value("--relevance-requests")
         apply_in = read_flag_value("--apply-relevance")
+        temp_dir_arg = read_flag_value("--temp-dir")
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         return 2
@@ -954,18 +1375,35 @@ def main():
         print("[ERROR] --full нельзя совмещать с --relevance-requests / --apply-relevance", file=sys.stderr)
         return 2
 
-    project_root = get_project_root()
-    temp_dir = project_root / ".claude" / "temp_files"
+    if temp_dir_arg is not None:
+        project_root = None
+        temp_dir = temp_dir_arg
+    else:
+        project_root = get_project_root()
+        temp_dir = project_root / ".claude" / "temp_files"
 
     if requests_out is not None:
         return run_relevance_requests(temp_dir, requests_out)
     if apply_in is not None:
         return run_apply_relevance(temp_dir, apply_in)
 
-    print(f"[INFO] Корень проекта: {project_root}", file=sys.stderr)
-    print(f"[INFO] Режим: {'FULL (--full)' if full_mode else 'INCREMENTAL'}", file=sys.stderr)
+    print(f"[INFO] Корень проекта: {project_root or '(не используется, задан --temp-dir)'}", file=sys.stderr)
+    print(f"[INFO] Режим: {'FULL (--full)' if full_mode else 'INCREMENTAL'}"
+          f"{' (DRY-RUN, без записи)' if dry_run else ''}", file=sys.stderr)
 
     graph = load_graph(temp_dir, full_mode)
+
+    # Контракт входов и раскладка (только инкремент): при нарушении граф не строится
+    ctx = None
+    if not full_mode:
+        ctx, errors = prepare_incremental(temp_dir, graph)
+        if errors:
+            for e in errors:
+                print("[ERROR] " + e, file=sys.stderr)
+            print("[ERROR] Входы Фазы 4 не готовы (" + str(len(errors)) + "): граф не построен, "
+                  "ничего не записано", file=sys.stderr)
+            return 1
+
     # Статусы связей прежнего графа переносятся доменам, которые seed не переопределил
     old_statuses = {
         d: info.get("relations_status") for d, info in (graph.get("domains") or {}).items()
@@ -973,7 +1411,14 @@ def main():
     }
 
     (new_nodes, new_edges, new_domains, new_file_ids, changed_file_ids,
-     dirty_domains, dirty_topics) = build_graph_state(temp_dir, graph)
+     dirty_domains, dirty_topics) = build_graph_state(temp_dir, graph, ctx)
+
+    if ctx:
+        # затронутые домены (Фаза 3б) и оба домена переехавшего файла пересобираются в --merge
+        dirty = set(dirty_domains) | ctx["affected_ids"]
+        for old_domain, new_domain in ctx["moved"].values():
+            dirty.update((old_domain, new_domain))
+        dirty_domains = sorted(d for d in dirty if d in new_domains)
 
     graph["nodes"] = new_nodes
     graph["edges"] = new_edges
@@ -990,6 +1435,11 @@ def main():
     else:
         stats = seed_edges_from_analysis(graph, temp_dir, domain_analyses,
                                          only_sources=set(new_file_ids) | set(changed_file_ids))
+        for path in sorted(set(new_file_ids) | set(changed_file_ids)):
+            domain_id = new_nodes.get(path, {}).get("domain_id")
+            if path not in domain_analyses.get(domain_id, {}):
+                print("[WARN] " + path + ": файл дельты без записи в " + str(domain_id) +
+                      "-analysis.json, его dependency не пересобраны", file=sys.stderr)
     print(f"[OK] Рёбра dependency из анализа доменов: добавлено {stats['added']}, "
           f"неоднозначных {stats['ambiguous']}, без цели в графе {stats['unresolved']}, "
           f"файлов вне графа {stats['unknown_source']}", file=sys.stderr)
@@ -1002,16 +1452,58 @@ def main():
     for w in warnings:
         print(f"[WARN] {w}", file=sys.stderr)
 
-    cycles = has_dependency_cycle(graph)
-    for c in cycles:
-        print(f"[WARN] {c}", file=sys.stderr)
+    cycles = find_dependency_cycles(graph)
+    if full_mode:
+        delta_cycles, old_cycles = [], cycles
+    else:
+        delta_cycles, old_cycles = split_cycles_by_delta(graph, cycles)
+    for c in old_cycles:
+        print("[WARN] Цикл dependency из старых рёбер: " + " -> ".join(c), file=sys.stderr)
+    if delta_cycles:
+        for c in delta_cycles:
+            print("[FAIL] Цикл dependency с ребром дельты: " + " -> ".join(c), file=sys.stderr)
+        files = sorted({f for c in delta_cycles for f in c})
+        print("[FAIL] Файлы в циклах дельты (" + str(len(files)) + "): " + "; ".join(files) +
+              ". Исправление: повторный анализ этих файлов. Граф не записан", file=sys.stderr)
+        return 1
     if not cycles:
         print("[OK] Циклов dependency не найдено", file=sys.stderr)
+
+    if ctx:
+        for w in check_related_domains(graph):
+            print("[WARN] " + w, file=sys.stderr)
+        if ctx["has_taxonomy"]:
+            missing, extra = reconcile_file_nodes(graph, ctx["expected"])
+            if missing or extra:
+                if missing:
+                    print("[FAIL] Файлы из taxonomy.json/дельты без узла в графе (" + str(len(missing)) +
+                          "): " + "; ".join(missing), file=sys.stderr)
+                if extra:
+                    print("[FAIL] Файловые узлы графа вне taxonomy.json и дельты (" + str(len(extra)) +
+                          "): " + "; ".join(extra), file=sys.stderr)
+                print("[FAIL] Структура и граф расходятся, граф не записан", file=sys.stderr)
+                return 1
+            print("[OK] Файловые узлы графа совпадают с taxonomy.json плюс дельта (" +
+                  str(len(ctx["expected"])) + ")", file=sys.stderr)
+        else:
+            print("[INFO] taxonomy.json без доменов: сверка файлов графа пропущена", file=sys.stderr)
+
+    relevance_required = collect_relevance_required(new_file_ids, new_nodes, domain_analyses)
+
+    if dry_run:
+        print(f"[DRY-RUN] Граф не записан. Был бы: revision={graph.get('revision', 0) + 1}, "
+              f"узлов={len(graph['nodes'])}, рёбер={len(graph['edges'])}, "
+              f"dirty-доменов={len(dirty_domains)}, новых файлов={len(new_file_ids)}, "
+              f"изменённых={len(changed_file_ids)}", file=sys.stderr)
+        return 0
+
+    saved = backup_before_write(temp_dir)
+    if saved:
+        print("[INFO] Копии для отката: " + ", ".join(saved), file=sys.stderr)
 
     graph = save_graph(temp_dir, graph)
     append_revision_log(temp_dir, graph["revision"], dirty_domains)
 
-    relevance_required = collect_relevance_required(new_file_ids, new_nodes, domain_analyses)
     save_dirty_domains(temp_dir, graph["revision"], dirty_domains, dirty_topics,
                         new_file_ids, changed_file_ids, relevance_required)
 

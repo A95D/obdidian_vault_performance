@@ -104,6 +104,36 @@
 
 ---
 
+## Режим «добавление» (инкремент)
+
+Вход - тексты новых и изменённых файлов домена (дельта) и контекст старых
+файлов (`essence`, `key_concepts` из `taxonomy.json`):
+
+```json
+{
+  "mode": "add",
+  "domain_id": "data-vault",
+  "domain_name": "Data Vault 2.0",
+  "delta_files": [ { "path": "Hubs.md", "status": "new" } ],
+  "old_files": [ { "path": "Data Vault 2.0.md", "essence": "...", "key_concepts": ["..."] } ]
+}
+```
+
+Выход - тот же `{domain_id}-analysis.json` и та же схема записи файла
+("Поля анализа файла"), но только для дельты:
+
+- `files` - записи только файлов дельты, в порядке `delta_files`;
+  `total_files` равен числу файлов дельты. Старые файлы в `files` не входят
+- `domain_summary` - по дельте; `related_domain_topics` по-прежнему `[]`
+- `dependencies` направлены от новых файлов к любым (новым и старым). У
+  изменённого файла исходящие `dependencies` пересобираются, а не
+  переносятся. Взаимных зависимостей и циклов нет (A -> B исключает B -> A,
+  в том числе через цепочку)
+- итоговые `topics`, `mastery_percent` и `has_notes` для домена целиком
+  выставляет `vault-topic-reassessor` по схеме "Поле `domain_summary.topics`"
+
+---
+
 ## Best Practices
 
 ### ✓ Делай

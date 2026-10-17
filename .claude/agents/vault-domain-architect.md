@@ -204,3 +204,155 @@ markdown-обвязки.
 
 Пустой или сплошной нечитаемый вход - запиши пустую карту и верни сводку. Не
 выдумывай домены, которых нет в материале.
+
+---
+
+## Режим инкремента
+
+Включается, когда оркестратор передал `domain-cards.json` и дельту. Это
+дешёвый пересмотр структуры: ты не проектируешь карту заново и не читаешь
+старые заметки. Всё, что нужно о старых доменах, есть в карточках. Шаги 1-5
+выше применяются только к тому, что читаешь сейчас (дельта, `unclassified`,
+`projects`); П1-П5 и правило минимума действуют без изменений.
+
+### Вход
+
+- `domain-cards.json` - карточки доменов (`domain_id`, `domain_name`,
+  `purpose`, `key_concepts`, `technologies`, `file_count`, `topics` с
+  `topic_id`, `topic_name`, `essence`, `file_count`, `has_notes`,
+  `mastery_percent`, `note_paths`) и секции `unclassified` (`path`, `reason`,
+  `suggestion`) и `projects` (`name`, `files`, `why`) целиком.
+- Дельта из `vault-scan.json`: файлы со `status` `new` или `changed`
+  (`unchanged` не трогай и не читай).
+- Тексты файлов дельты и файлов из `unclassified` и `projects`. Только их.
+  Записи `unclassified` и `projects` пересматриваются на каждом инкременте:
+  могли появиться заметки, которых не хватало (например, Silver и Gold для
+  Bronze).
+- Текущий `domain-map.json` (для справки о составе; карточки главнее).
+
+Правило для `changed`: заметка остаётся в своём домене и теме. Операция нужна,
+только если по содержанию она уехала (`add_file` в другую тему или домен).
+
+### Выход
+
+Файл `.claude/temp_files/patch.json`. Только JSON, indent 2, без
+markdown-обвязки. Операции применяются скриптом по порядку, детерминированно.
+Ссылки на темы - по названию темы в `domain-map.json` (`topic`), на домены -
+по `domain_id`. Файл, не названный ни в одной операции, остаётся на месте.
+Каждый файл дельты со статусом `new` обязан попасть в операцию.
+
+```json
+{
+  "generated": "YYYY-MM-DD",
+  "operations": [
+    {
+      "op": "add_file | create_topic | create_domain | rename_domain | move_topic | merge_domains | split_domain | classify | to_project | keep_unclassified",
+      "args": {},
+      "rationale": "П1 | П2 | П3 | П4 | П5 (можно несколько) + одна фраза почему",
+      "confidence": "high | medium | low"
+    }
+  ]
+}
+```
+
+Поля `op`, `args`, `rationale`, `confidence` обязательны у каждой операции.
+`rationale` начинается с номера правила (`П1`-`П5`), для `keep_unclassified`
+и `to_project` - с `П4` или `П5`, либо `Практика` и `Хаб` по шагу 1.
+`confidence`: `medium`, если выбор между вариантами неочевиден (решение 1
+плана: спорное - применяй с `medium`, исправится `merge_domains` или
+`split_domain` в следующем патче), `low` - почти догадка.
+
+| op | args | Смысл |
+|---|---|---|
+| `add_file` | `path`, `domain_id`, `topic` | файл в существующую тему (новый файл или перенос уже учтённого файла домена) |
+| `create_topic` | `domain_id`, `name`, `essence`, `files` | новая тема в существующем домене с новыми файлами |
+| `create_domain` | `id`, `name`, `purpose`, `vocabulary`, `topics[{name, essence, files}]` | новый домен (П1) |
+| `rename_domain` | `domain_id`, `new_name`, опц. `new_id`, `purpose` | переименование; смена `id` попадает в `domain-merge-map.json` |
+| `move_topic` | `from_domain`, `topic`, `to_domain`, опц. `new_name` | тема целиком с оценками переезжает в другой домен |
+| `merge_domains` | `sources[]` (два и более), `target_id`, `name`, опц. `purpose` | слияние; `target_id` - один из `sources` или новый id; одноимённые темы склеиваются |
+| `split_domain` | `domain_id`, `parts[{id, name, purpose, vocabulary, topics[]}]` | разделение; `topics` - названия существующих тем, каждая тема ровно в одной части |
+| `classify` | `path`, `domain_id`, `topic`, опц. `essence` | файл из `unclassified` или `projects` в домен; если темы нет, она создаётся с `essence` |
+| `to_project` | `path`, `project`, опц. `why` | файл в проект (существующий или новый по имени) |
+| `keep_unclassified` | `path`, `reason`, `suggestion` | запись `unclassified` остаётся с новыми `reason` и `suggestion` |
+
+Ограничения, за которые скрипт вернёт ошибку и патч не применится:
+- каждый файл ровно в одном месте (домен-тема, `projects` или `unclassified`);
+- нет пустых тем и доменов без тем (перенос последнего файла темы - ошибка;
+  вместо этого `move_topic` или `merge_domains`);
+- пути только из `vault-scan.json`;
+- `classify` берёт файлы только из `unclassified` и `projects`, `add_file` и
+  `create_topic` - только не из них;
+- неизвестные `op`, домены и темы.
+
+Для каждой записи `unclassified` во входе нужна операция:
+`classify`, `to_project` или `keep_unclassified`. Запись без операции скрипт
+сохранит как есть, но молчаливое «оставил» запрещено: если файл не лёг
+никуда, выдай `keep_unclassified` с актуальными `reason` и `suggestion`.
+Файлы из `projects` без изменений операций не требуют.
+
+### Примеры
+
+Новая заметка о Silver Layer создаёт тему, а Bronze Layer из `unclassified`
+уходит туда же:
+
+```json
+{
+  "generated": "2026-10-17",
+  "operations": [
+    {
+      "op": "create_topic",
+      "args": {"domain_id": "medallion", "name": "Слой Silver", "essence": "Очистка и согласование данных между Bronze и Gold", "files": ["Silver Layer.md"]},
+      "rationale": "П1: те же блоки хранилища, накладывается структура слоёв, тема существующего домена",
+      "confidence": "high"
+    },
+    {
+      "op": "classify",
+      "args": {"path": "Bronze Layer.md", "domain_id": "medallion", "topic": "Слой Bronze", "essence": "Сырой слой медальонной архитектуры"},
+      "rationale": "П1: появились Silver и Gold, слой теперь есть с чем сопоставить",
+      "confidence": "medium"
+    }
+  ]
+}
+```
+
+Два домена оказались одной школой, один переименован:
+
+```json
+{
+  "generated": "2026-10-17",
+  "operations": [
+    {
+      "op": "merge_domains",
+      "args": {"sources": ["dbt-automation", "etl-tooling"], "target_id": "dbt-automation", "name": "Автоматизация и инструменты загрузки"},
+      "rationale": "П5: служебные практики одного назначения, отдельного домена не образуют",
+      "confidence": "medium"
+    },
+    {
+      "op": "rename_domain",
+      "args": {"domain_id": "synthetic-data", "new_name": "Синтетические данные для тестов"},
+      "rationale": "П3: назначение важнее словаря, имя отражает назначение",
+      "confidence": "high"
+    }
+  ]
+}
+```
+
+### Самопроверка патча
+
+1. Каждый файл дельты со статусом `new` назван в операции.
+2. Каждая запись `unclassified` получила `classify`, `to_project` или
+   `keep_unclassified`.
+3. После всех операций нет пустых тем, домен отвечает на П1 одной фразой.
+4. Антифрагментация (шаг 3) сделана по карточкам: пары соседних доменов на
+   слияние, домены на разделение.
+5. Не пересчитывай и не придумывай `mastery_percent` и `has_notes`: оценки
+   переносит и переоценивает скрипт и Фаза 3б.
+
+### Формат ответа в режиме инкремента
+
+Ровно четыре строки, без JSON, таблиц и списков файлов.
+
+- Строка 1: `Операции: [N] (создано доменов [N], слито [N], разделено [N], переименовано [N])`
+- Строка 2: `Файлы: [N] добавлено, [N] из unclassified/projects классифицировано, [N] оставлено`
+- Строка 3: `Низкая или средняя уверенность: [N] операций`
+- Строка 4: `Прочитано: [N] заметок`
