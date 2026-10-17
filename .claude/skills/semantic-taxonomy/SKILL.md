@@ -333,9 +333,19 @@ llm put .claude/temp_files/vault-structure-analysis.json
 llm put <VAULT_PATH>/<файлы_домена>                   # файлы этого domain_id
 llm put .claude/agents/vault-domain-analyzer.md       # ТЗ (схема анализа)
 llm put .claude/skills/analyze-vault-domain/references/REFERENCE.md
-llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md."
-llm get {domain_id}-analysis.json                     # забрать результат
+llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md." </dev/null
+bash .claude/skills/semantic-taxonomy/scripts/llm_fetch.sh llm-phase2/{domain_id}-analysis.json .claude/temp_files   # забрать результат
 ```
+
+Правила для циклов с `llm` (нарушение этих правил уже ломало прогон):
+- Каждый вызов `llm` получает `</dev/null`. Без этого `llm` читает stdin и
+  съедает оставшийся список доменов цикла, при этом цикл завершается с кодом 0.
+- Список доменов читается через отдельный дескриптор (`while read ... <&3; done 3< список`).
+- Файлы забираются только через `llm_fetch.sh`: голый `llm get` кладёт файл
+  относительно текущей папки, то есть в корень проекта.
+- После цикла проверить, что есть все `{domain_id}-analysis.json` и что JSON
+  валиден с полем `domain_summary`. Для недостающих доменов - fallback через
+  Agent tool.
 
 Полученный `{domain_id}-analysis.json` положить в `.claude/temp_files/` — он
 используется в Фазах 3-6 точно так же, как если бы его написал
@@ -416,15 +426,29 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
 
 ### Что происходит
 
-1. Скрипт строит/обновляет `.claude/temp_files/topic-graph.json` — трёхуровневый
-   граф домен → тема → файл (узлы + рёбра `member_of`), сравнивая content_hash
-   файлов с хешами, уже записанными в графе.
-2. Новые и изменившиеся файлы помечают свой домен (и, если тема уже известна,
-   тему) как **dirty** — список пишется в
-   `.claude/temp_files/graph-dirty-domains.json` (одноразовый артефакт этого
-   прогона, вход для Фаз 3-6).
+1. Скрипт строит/обновляет `.claude/temp_files/topic-graph.json` - граф домен -> тема -> файл.
+   Узлы файлов и доменов создаются всегда, рёбра `member_of` связывают файл с доменом и,
+   если тема известна, с темой. Узлы тем (`kind="topic"`) появляются только для файлов,
+   привязанных к теме: по `taxonomy.json` прошлых прогонов или, пока тем в `taxonomy.json`
+   нет (первый прогон), по `vault-structure-analysis.json` (`domains[].topics[].note_paths`).
+2. Новые файлы помечают только свой домен как **dirty**; изменившиеся помечают домен и,
+   если их тема известна, тему. Список пишется в
+   `.claude/temp_files/graph-dirty-domains.json` (одноразовый артефакт этого прогона,
+   вход для Фаз 3-6). Поэтому на первом прогоне `dirty_topics` пуст: все файлы новые.
 3. Ревизия графа инкрементируется, история пишется в
    `.claude/temp_files/graph-revision-log.json`.
+4. Рёбра `dependency` строятся из поля `dependencies` файлов в `{domain}-analysis.json`
+   (Фаза 2). В полном режиме берутся все файлы с анализом, в инкрементальном - только
+   новые и изменившиеся файлы со свежим анализом; остальные рёбра сохраняются. Ссылка
+   резолвится в файл графа: сначала точный путь, затем имя файла с приоритетом своего
+   домена. Неоднозначная ссылка (несколько кандидатов, ни один в своём домене) и
+   ненайденная ссылка рёбра не дают, причина выводится в stderr. `mentions` хранятся в
+   узле файла и в рёбра не превращаются.
+5. Каждому домену присваивается `relations_status`: `derived` (есть рёбра dependency),
+   `dependencies_unresolved` (ссылки были, ни одна не разрешилась), `no_dependencies_found`
+   (зависимостей нет). Домен, не обработанный в этом прогоне, сохраняет прежний статус,
+   без него получает `not_derived`.
+6. Рёбра `related` скрипт не выводит: их создаёт только `vault-relevance-finder` (см. ниже).
 
 **Важно про новые файлы**: essence/key_concepts для только что добавленной
 заметки берутся из классификации шага 1.2 (`semantic-analysis-cache.json`),
@@ -437,18 +461,44 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
 
 ### Поиск related/dependencies для новых файлов
 
-Для каждого **нового** файла (не изменившегося — только для `new_file_ids`
-из `graph-dirty-domains.json`) оркестратор вызывает субагента
-`vault-relevance-finder` (**Agent tool**, `subagent_type: "vault-relevance-finder"`,
-модель Haiku) с компактным входом: `essence`/`key_concepts` новой заметки +
-сжатые узлы (`node_id`, `title`, `key_concepts`, `type`) её dirty-домена, без
-доступа к файлам vault.
+Связи `related` создаёт только `vault-relevance-finder`. Субагент вызывается не для всех
+новых файлов, а только для списка `relevance_required` в `graph-dirty-domains.json`:
+новых файлов, для которых нет свежего `{domain}-analysis.json` их домена в этом прогоне.
+Связи остальных новых файлов уже посчитаны Фазой 2 (шаг 4 выше). Изменившиеся файлы
+в `relevance_required` не попадают. В полном режиме список обычно пуст; скрипт печатает
+в stderr число файлов, требующих вызова (`[INFO] Файлов, требующих вызова
+vault-relevance-finder: N`).
 
-- Один вызов Agent tool на один новый файл; при нескольких новых файлах —
-  все вызовы в одном сообщении (параллельно), по аналогии с Фазой 2.
-- Ответ — строго `{"related": [...], "dependencies": [...]}`; любые `node_id`,
-  не входящие в переданный список узлов домена, отбрасываются (не
-  применяются как рёбра), это логируется в stderr, а не в диалог.
+Команды (из корня проекта):
+```bash
+python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py --relevance-requests .claude/temp_files/relevance-requests.json
+```
+Файл `relevance-requests.json` имеет вид `{"requests": {"<node_id>": {"new_file": {...}, "domain_nodes": [...]}}}`.
+Для каждого `node_id` оркестратор вызывает Agent tool `vault-relevance-finder`
+(`subagent_type: "vault-relevance-finder"`, модель Haiku) с объектом `requests[node_id]`
+как входом. Вызовы - в одном сообщении (параллельно), по аналогии с Фазой 2. Ответ
+каждого субагента - `{"related": [...], "dependencies": [...]}`. Оркестратор собирает
+ответы в `.claude/temp_files/relevance-results.json` в виде
+`{"results": {"<node_id>": {"related": [...], "dependencies": [...]}}}` и применяет:
+```bash
+python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py --apply-relevance .claude/temp_files/relevance-results.json
+```
+
+Поведение `--apply-relevance`:
+- `node_id`, которого нет в графе как файла, пропускается с предупреждением в stderr.
+- Цель вне домена файла, самоссылка и цель, указанная и в `related`, и в `dependencies`,
+  отбрасываются или сводятся к `dependency`; каждый случай - предупреждение в stderr.
+  Один битый ответ не останавливает прогон.
+- Повторное применение того же файла ничего не меняет: рёбра не дублируются, revision
+  не растёт. Revision растёт, только если добавлены рёбра или изменён статус домена.
+- `graph-dirty-domains.json` и `dirty_domains` не меняются.
+- `--relevance-requests` и `--apply-relevance` нельзя совмещать с `--full` и друг с другом;
+  ошибка аргументов - код возврата 2.
+
+`--full` пересобирает граф с нуля и стирает связи, полученные через `--apply-relevance`.
+После полного прогона `related` не восстанавливаются автоматически: вызов субагента
+нужен только для файлов из `relevance_required`, а для файлов с анализом Фазы 2 список пуст.
+
 - Если вызов на Haiku не удался — повторить тот же вызов с `model: inherit`.
   Если и это не удалось — `related`/`dependencies` для заметки остаются
   пустыми, пересчёт остальных dirty-доменов не блокируется.
@@ -461,10 +511,11 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
   увеличился на 1
 - [ ] `.claude/temp_files/graph-dirty-domains.json` создан, `dirty_domains`
   соответствует доменам реально новых/изменившихся файлов
-- [ ] Для каждого `new_file_id` был вызван `vault-relevance-finder` (или его
-  `model: inherit` повтор), и только для них
-- [ ] Для `changed_file_ids` без тематических изменений `vault-relevance-finder`
-  НЕ вызывался (эта фичa только про новые файлы, не про пересчёт existing-связей)
+- [ ] Для каждого `node_id` из `relevance_required` был вызван `vault-relevance-finder`
+  (или его `model: inherit` повтор), и только для них; если список пуст - вызовов нет
+- [ ] Для `changed_file_ids` `vault-relevance-finder` НЕ вызывался (`relevance_required`
+  содержит только новые файлы)
+- [ ] Если запускался `--apply-relevance`, он завершился с кодом 0 без `[ERROR]` в stderr
 - [ ] Ни один raw JSON графа/ответа субагента не попал в диалог
 
 ---
