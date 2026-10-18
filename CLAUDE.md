@@ -74,7 +74,8 @@
 10. Инкрементальное обновление (`synthesize_taxonomy.py --merge`) работает от
     дельты. Dirty = новые и изменённые файлы: `status` `new | changed` в
     `vault-scan.json` (`--scan --new-only` сверяет хеш файла с `content_hash` узла
-    `topic-graph.json`) - единственный источник «что нового». Без графа прогон
+    `topic-graph.json`, для записей `projects`/`unclassified` - с `content_hash` из
+    `taxonomy.json`) - единственный источник «что нового». Без графа прогон
     полный. Источник состояния - `taxonomy.json`, `domain-map.json`, граф.
     - Структура пересматривается дёшево, по накопленным данным, без чтения
       старых текстов: `build_domain_cards.py` (`domain-cards.json`) ->

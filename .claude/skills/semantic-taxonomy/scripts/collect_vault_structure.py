@@ -4,20 +4,23 @@
 
 Два режима, вызываемые последовательно одним и тем же скриптом.
 
-  --scan [--new-only [--baseline-taxonomy]]
+  --scan [--new-only [--baseline-taxonomy]] [--temp-dir DIR]
       Сканирует все .md файлы vault и прогоняет их через дешёвый
       эвристический пре-фильтр шума (без LLM): служебные папки, пустые
       заметки, заметки состоящие только из вставок изображений. Сверяет
       content-hash с кешем, чтобы отделить новое от неизменившегося.
       Выход: .claude/temp_files/vault-scan.json.
 
-  --collect [--new-only]
+  --collect [--new-only] [--temp-dir DIR]
       После того как vault-domain-architect отработал и записал
       .claude/temp_files/domain-map.json, собирает финальную структуру
       файл -> домен -> тема. Кеш здесь не пишется: его обновляет
       synthesize_taxonomy.py после успешной записи taxonomy.json (там же
       применяется .claude/temp_files/domain-merge-map.json).
       Выход: .claude/temp_files/vault-structure-analysis.json.
+
+--temp-dir DIR - папка для входов и выходов вместо .claude/temp_files проекта (оба режима).
+Корень проекта и .env при этом прежние: путь к vault берётся из .env или VAULT_PATH.
 
 Между --scan и --collect оркестратор (SKILL.md) вызывает ровно один раз
 vault-domain-architect на весь vault. Батчей больше нет.
@@ -69,6 +72,26 @@ BACKSLASH = chr(92)
 def get_project_root():
     """Определить корень проекта по расположению скрипта."""
     return Path(__file__).resolve().parents[4]
+
+
+def resolve_temp_dir(project_root: Path, temp_dir=None) -> Path:
+    """Папка temp_files: заданная через --temp-dir или .claude/temp_files проекта."""
+    return Path(temp_dir) if temp_dir else project_root / ".claude" / "temp_files"
+
+
+def parse_temp_dir(argv):
+    """Значение --temp-dir DIR (или --temp-dir=DIR) из argv; None, если флага нет."""
+    for i, arg in enumerate(argv):
+        if arg == "--temp-dir":
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                raise ValueError("--temp-dir требует путь к папке")
+            return argv[i + 1]
+        if arg.startswith("--temp-dir="):
+            value = arg.split("=", 1)[1]
+            if not value:
+                raise ValueError("--temp-dir требует путь к папке")
+            return value
+    return None
 
 
 def load_vault_path(project_root: Path) -> Path:
@@ -213,7 +236,7 @@ def paths_from_unclassified_section(section) -> set:
     return paths
 
 
-def load_known_paths(project_root: Path) -> set:
+def load_known_paths(project_root: Path, temp_dir=None) -> set:
     """
     Загрузить известные пути файлов из существующей taxonomy.json.
 
@@ -221,7 +244,7 @@ def load_known_paths(project_root: Path) -> set:
     которым архитектор не назначил домен, иначе каждый инкрементальный прогон
     снова объявлял бы их новыми (см. план 2026-10-04-accounted-non-domain-files).
     """
-    taxonomy = load_json(project_root / ".claude" / "temp_files" / TAXONOMY_FILENAME, None)
+    taxonomy = load_json(resolve_temp_dir(project_root, temp_dir) / TAXONOMY_FILENAME, None)
     known_paths = set()
     if not taxonomy:
         return known_paths
@@ -234,9 +257,9 @@ def load_known_paths(project_root: Path) -> set:
     return known_paths
 
 
-def load_known_filtered_paths(project_root: Path) -> set:
+def load_known_filtered_paths(project_root: Path, temp_dir=None) -> set:
     """Пути файлов, уже перечисленные в filtered_out прежней taxonomy.json."""
-    taxonomy = load_json(project_root / ".claude" / "temp_files" / TAXONOMY_FILENAME, None)
+    taxonomy = load_json(resolve_temp_dir(project_root, temp_dir) / TAXONOMY_FILENAME, None)
     if not taxonomy:
         return set()
     filtered = taxonomy.get("filtered_out") or {}
@@ -244,15 +267,44 @@ def load_known_filtered_paths(project_root: Path) -> set:
             if isinstance(f, dict) and isinstance(f.get("path"), str)}
 
 
+def load_off_domain_hashes(temp_dir: Path) -> dict:
+    """
+    Хеши off-domain записей taxonomy.json: {путь: content_hash} из unclassified.items[]
+    (поле content_hash) и projects.items[] (словарь content_hashes). Файла нет, он нечитаем
+    или записи старого формата без хеша - такие пути в словарь не попадают и остаются new.
+    Миграция: старые записи будут new один раз, до ближайшего synthesize_taxonomy.py --merge,
+    который допишет хеши.
+    """
+    taxonomy = load_json(temp_dir / TAXONOMY_FILENAME, None)
+    hashes = {}
+    if not isinstance(taxonomy, dict):
+        return hashes
+    for section_name in ("projects", "unclassified"):
+        section = taxonomy.get(section_name)
+        items = section.get("items") if isinstance(section, dict) else section
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("path"), str) and item.get("content_hash"):
+                hashes[item["path"].replace(BACKSLASH, "/")] = item["content_hash"]
+            per_file = item.get("content_hashes")
+            if isinstance(per_file, dict):
+                for path, content_hash in per_file.items():
+                    if isinstance(path, str) and content_hash:
+                        hashes[path.replace(BACKSLASH, "/")] = content_hash
+    return hashes
+
+
 def load_graph_hashes(temp_dir: Path):
     """
-    Хеши файлов из узлов topic-graph.json: {путь: content_hash}.
+    Хеши файлов из узлов topic-graph.json: {путь: content_hash}, дополненные хешами записей
+    projects/unclassified из taxonomy.json (в графе их нет). Приоритет у хеша из графа.
     Возвращает None, если графа нет или он нечитаем (сравнивать не с чем).
     """
     graph = load_json(temp_dir / GRAPH_FILENAME, None)
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), dict):
         return None
-    hashes = {}
+    hashes = load_off_domain_hashes(temp_dir)
     for path, node in graph["nodes"].items():
         if isinstance(node, dict) and node.get("kind") == "file":
             hashes[str(path).replace(BACKSLASH, "/")] = node.get("content_hash")
@@ -344,12 +396,13 @@ def normalize_unclassified_section(raw_unclassified, scan_paths: set):
         items.append({"path": path, "reason": reason, "suggestion": suggestion})
     return items, dropped
 
-def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False) -> int:
+def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False, temp_dir=None) -> int:
     """
     Шаг 1: собрать список заметок, годных к анализу, и отсеять мусор.
     Выход: vault-scan.json - вход для vault-domain-architect.
     """
-    temp_dir = project_root / ".claude" / "temp_files"
+    override = temp_dir
+    temp_dir = resolve_temp_dir(project_root, override)
     vault_path = load_vault_path(project_root)
     print("[INFO] Vault path: " + str(vault_path), file=sys.stderr)
 
@@ -377,7 +430,7 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
     if new_only and baseline_taxonomy:
         # Восстановление после несогласованного графа: новое = пути, которых нет в taxonomy.json.
         # Изменённые файлы так не обнаружить (хешей в taxonomy.json нет), режим одноразовый.
-        taxonomy_paths = load_known_paths(project_root)
+        taxonomy_paths = load_known_paths(project_root, override)
         if not taxonomy_paths:
             raise FileNotFoundError("--baseline-taxonomy: taxonomy.json не найден или пуст")
         baseline = "taxonomy"
@@ -419,7 +472,7 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
           ", без изменений: " + str(status_counts[STATUS_UNCHANGED]), file=sys.stderr)
 
     # Защита: пути из taxonomy.json, которых нет в vault (удалены или переименованы).
-    missing = sorted(p for p in load_known_paths(project_root) if not (vault_path / p).exists())
+    missing = sorted(p for p in load_known_paths(project_root, override) if not (vault_path / p).exists())
     if missing:
         print("[WARN] В " + TAXONOMY_FILENAME + " есть пути, которых нет в vault: " +
               str(len(missing)), file=sys.stderr)
@@ -446,12 +499,13 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
     return 0
 
 
-def cmd_collect(project_root: Path, new_only: bool) -> int:
+def cmd_collect(project_root: Path, new_only: bool, temp_dir=None) -> int:
     """
     Шаг 2: из domain-map.json собрать структуру файл -> домен -> тема.
     Кеш не трогает: он обновляется после записи taxonomy.json (synthesize_taxonomy.py).
     """
-    temp_dir = project_root / ".claude" / "temp_files"
+    override = temp_dir
+    temp_dir = resolve_temp_dir(project_root, override)
     vault_path = load_vault_path(project_root)
 
     scan = load_json(temp_dir / SCAN_FILENAME, None)
@@ -569,7 +623,7 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
     }
 
     if new_only:
-        known_paths = load_known_paths(project_root)
+        known_paths = load_known_paths(project_root, override)
         graph_hashes = load_graph_hashes(temp_dir)
         if scan.get("baseline") in ("graph", "taxonomy") or (graph_hashes is not None and "baseline" not in scan):
             # Дельта по status из vault-scan.json: new и changed.
@@ -611,9 +665,12 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
             # Сколько кандидатов и шума добавилось к уже учтённому - по этим
             # числам synthesize_taxonomy.py продолжает арифметику покрытия
             # поверх прежней taxonomy.json.
-            known_filtered = load_known_filtered_paths(project_root)
+            known_filtered = load_known_filtered_paths(project_root, override)
+            # Уже учтённые в прежней taxonomy.json пути (изменённые, а также new без хеша в
+            # projects/unclassified при миграции) в базу покрытия входят: второй раз их не считаем.
             vault_data["metadata"]["new_candidates_count"] = len(
-                [e for e in scan.get("files", []) if is_delta(e.get("path"))])
+                [e for e in scan.get("files", [])
+                 if is_delta(e.get("path")) and e.get("path") not in known_paths])
             vault_data["metadata"]["new_filtered_count"] = len(
                 [f for f in scan.get("filtered_out", [])
                  if isinstance(f, dict) and f.get("path") not in known_filtered])
@@ -645,13 +702,14 @@ def main():
     new_only = "--new-only" in sys.argv
     baseline_taxonomy = "--baseline-taxonomy" in sys.argv
     try:
+        temp_dir = parse_temp_dir(sys.argv)
         project_root = get_project_root()
         print("Корень проекта: " + str(project_root), file=sys.stderr)
 
         if "--scan" in sys.argv:
-            return cmd_scan(project_root, new_only, baseline_taxonomy)
+            return cmd_scan(project_root, new_only, baseline_taxonomy, temp_dir)
         elif "--collect" in sys.argv:
-            return cmd_collect(project_root, new_only)
+            return cmd_collect(project_root, new_only, temp_dir)
         else:
             print("[ERROR] Укажи режим: --scan или --collect (опционально с --new-only).", file=sys.stderr)
             return 1

@@ -12,6 +12,11 @@
   - topic_id уникальны, обязательные поля на месте
   - mastery_percent - целое 0-100; у тем без заметок не выше 15 (клип, WARN)
   - каждый файл домена привязан хотя бы к одной теме (один файл может подкреплять несколько тем)
+  - удержание тем (только при наличии reassess-input/{domain_id}.json): ОШИБКА, если известный
+    topic_id пропал из ответа, а его файлы остались в домене (контракт агента допускает только
+    добавление тем, без удаления и слияния). WARN (поле warnings в результате): тема пропала вместе
+    со всеми своими файлами; у темы с теми же файлами, что во входе, и без файлов дельты оценка
+    отличается от прежней
 
 Использование:
   python validate_reassessed_topics.py --domain DOMAIN_ID [--temp-dir DIR] [--input FILE]
@@ -69,8 +74,50 @@ def domain_paths(domain_id, taxonomy, affected, reassess=None):
     return paths
 
 
-def validate(doc, paths):
-    """Вернуть (очищенный документ, ошибки, предупреждения)."""
+def retention_problems(topics, reassess, paths):
+    """
+    Удержание тем по входу переоценки. Возвращает (ошибки, предупреждения).
+    Известный topic_id, пропавший из ответа, - ошибка, если его прежние файлы остались в домене
+    (paths): агент не имеет права удалять и сливать темы. Если файлы темы ушли из домена, пропажа
+    легитимна, пишется WARN. Прежние файлы берутся из reassess["topics"] по topic_id.
+    Оценка неизменённой темы (те же note_paths, без файлов дельты) сверяется с прежней; при
+    повторе topic_id во входе (слияние доменов) прежняя оценка неоднозначна и не проверяется.
+    """
+    errors = []
+    warns = []
+    answered = {t["topic_id"]: t for t in topics if isinstance(t.get("topic_id"), str)}
+    prior = {}
+    for t in reassess.get("topics") or []:
+        prior.setdefault(t.get("topic_id"), []).append(t)
+    for tid in reassess.get("known_topic_ids") or []:
+        if tid in answered:
+            continue
+        old_files = set()
+        for t in prior.get(tid, []):
+            old_files |= set(t.get("note_paths") or [])
+        if old_files & paths:
+            errors.append("известная тема " + str(tid) + " пропала из ответа, хотя её файлы остались в домене "
+                          "(удаление и слияние тем контрактом агента не предусмотрены)")
+        else:
+            warns.append("тема " + str(tid) + " пропала вместе со своими файлами (файлы ушли из домена)")
+    delta = {r.get("path") for r in reassess.get("delta_files") or [] if isinstance(r, dict)}
+    for tid, items in prior.items():
+        topic = answered.get(tid)
+        if topic is None or len(items) != 1:
+            continue
+        before = items[0]
+        files = set(topic.get("note_paths") or [])
+        if files != set(before.get("note_paths") or []) or files & delta:
+            continue
+        if topic.get("mastery_percent") != before.get("mastery_percent"):
+            warns.append("тема " + str(tid) + ": файлы те же, дельты нет, а оценка изменена с " +
+                         json.dumps(before.get("mastery_percent")) + " на " +
+                         json.dumps(topic.get("mastery_percent")))
+    return errors, warns
+
+
+def validate(doc, paths, reassess=None):
+    """Вернуть (очищенный документ, ошибки, предупреждения). reassess - вход переоценки (необязателен)."""
     errors = []
     warns = []
     if not isinstance(doc, dict) or not isinstance(doc.get("topics"), list) or not doc["topics"]:
@@ -135,6 +182,12 @@ def validate(doc, paths):
         errors.append("файл домена не привязан ни к одной теме: " + p)
 
     result = {"domain_id": doc.get("domain_id"), "description": description, "topics": cleaned}
+    if reassess:
+        retention_errors, retained = retention_problems(cleaned, reassess, paths)
+        errors.extend(retention_errors)
+        if retained:
+            result["warnings"] = retained
+            warns.extend(retained)
     return result, errors, warns
 
 
@@ -165,7 +218,7 @@ def main():
     if not paths:
         print("[ОШИБКА] У домена " + args.domain + " нет файлов (ни в taxonomy.json, ни в дельте)", file=sys.stderr)
         return 2
-    result, errors, warns = validate(doc, paths)
+    result, errors, warns = validate(doc, paths, reassess)
     for w in warns:
         print("[WARN] " + args.domain + ": " + w, file=sys.stderr)
     if errors:

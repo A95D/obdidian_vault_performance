@@ -183,13 +183,30 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 
 Граф строго после шагов 5-6. Дельты нет (нет `new | changed`) - шаги 2-8 не нужны.
 
+**Драйвер `scripts/incremental.py`** сворачивает детерминированные шаги в четыре команды;
+скрипты выше остаются как есть, драйвер вызывает их подпроцессами и останавливается на
+первой ошибке. LLM он не вызывает, агентов между командами запускает оркестратор:
+
+| Команда | Заменяет шаги | Между командами |
+|---|---|---|
+| `incremental.py prepare` | 1-2 (scan, карточки; нет дельты - «шаги 2-8 не нужны») | архитектор -> `patch.json` |
+| `incremental.py apply [--dry-run]` | 4 (патч, `--collect --new-only`; печатает домены для анализатора) | анализаторы дельты |
+| `incremental.py reassess-input` | 6, вход (проверка свежих анализов, `build_reassess_input`) | переоценка тем |
+| `incremental.py finalize [--dry-run]` | 6 проверка, 7, 8 (validate по всем затронутым, граф, `--merge`, `--verify`) | - |
+| `incremental.py status` | только чтение: какой шаг следующий | - |
+
+Ограничения: `cleanup.py` драйвер не запускает (необратимо); `--temp-dir` пробрасывается
+всем подпроцессам, включая `collect_vault_structure.py`;
+`finalize` не заменяет `relevance_required`: он печатает `[WARN]`, `vault-relevance-finder` и
+`--apply-relevance` запускаются отдельно. `status` определяет шаг по mtime файлов в
+`temp_files`, поэтому после оборванного прогона без `cleanup.py` может показать неверный шаг.
+
 **Восстановление при несогласованном графе.** Если граф не содержит файлов, уже учтённых в
 `taxonomy.json` (оборванный прогон), статусы по хешам инвертируются. Одноразовый выход:
 `--scan --new-only --baseline-taxonomy` - `status` считается по путям относительно `taxonomy.json`
 (`new` - пути, которых там нет), в `vault-scan.json` поле `baseline: taxonomy`; изменённые файлы
 так не обнаружить. Анализы доменов с дельтой, свежие по содержимому (хеши совпадают с хешами в
 графе), но старше скана по времени, допустимо обновить `touch` только после такой сверки.
-Тесты `scripts/test_*.py` читают замороженный снимок `.claude/temp_files/_fixtures/` (нет снимка - пропуск).
 
 - **Карточки** (шаг 2): название, назначение, словарь, темы с `essence`, число
   файлов, плюс секции `unclassified` и `projects` целиком. Читается только `taxonomy.json`.
@@ -208,6 +225,16 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
   одинаковым названием, `split_domain` распределяет темы. Домены после `merge`,
   `split`, `classify` и с новыми файлами - затронутые (`affected-domains.json`),
   их темы переоцениваются. `--dry-run` проверяет патч, ничего не записывая.
+  `move_topic` помечает оба домена затронутыми, `split_domain` пишет старый id в
+  `domain-merge-map.json` (в часть с наибольшим числом файлов). Файл, перенесённый
+  без изменения (`add_file`, `move_topic`, `merge`/`split`), переезжает с прежней
+  записью из `taxonomy.json` (`essence` и поля анализа) без нового анализа, и попадает во
+  вход переоценки. Исключение - `classify` файла из `unclassified`/`projects`: прежней
+  записи нет, поэтому домен идёт на анализ, даже если файл не менялся. Валидатор темы
+  (`validate_reassessed_topics.py`) читает `reassess-input`. Ошибка (ответ отклоняется):
+  известный `known_topic_id` пропал из ответа, а его файлы остались в домене. Предупреждение
+  (пишется в `warnings` в `{domain}-topics.validated.json`): тема пропала вместе с файлами,
+  ушедшими из домена, или изменилась оценка темы без изменений в файлах. Агент `vault-topic-reassessor.md` самодостаточен, шкала оценок вписана в него.
 - **Режим «добавление»** (шаг 5): агент `vault-domain-analyzer` получает тексты
   только дельты плюс `essence` и `key_concepts` старых файлов домена из
   `taxonomy.json`. В `files` - записи только дельты, `total_files` - число файлов
@@ -244,7 +271,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 |---|---|---|---|
 | `apply_domain_patch.py` | патч применён | ошибка валидации (файл не ровно в одном месте, пустая тема), ничего не записано | - |
 | `build_reassess_input.py` | входы собраны | - | нет входного файла или анализа дельты |
-| `validate_reassessed_topics.py` | ответ годен (возможны WARN) | ошибки в ответе | нет входов |
+| `validate_reassessed_topics.py` | ответ годен (возможны WARN) | ошибки в ответе: переоценка домена повторяется с текстом `[FAIL]` в задании, `validated.json` руками не править | нет входов |
 | `build_topic_graph.py` | граф записан | входы не готовы, цикл `dependency` с ребром дельты, структура и граф расходятся (граф не записан) | ошибка аргументов |
 | `synthesize_taxonomy.py --merge` | `taxonomy.json` записан | нарушен инвариант (`taxonomy.json` и кеш не изменены) | нет входов или они устарели |
 | `synthesize_taxonomy.py --verify` | все проверки OK | хотя бы один `FAIL` | - |
@@ -341,8 +368,12 @@ frontmatter и файлы, состоящие только из вставок �
 (кеш пишется после `taxonomy.json`, но не хранит путей).
 
 В режиме Incremental хеш файла сверяется с `content_hash` его узла в
-`topic-graph.json`: файла нет в графе - `status: new`, хеш отличается -
-`changed`, совпал - `unchanged`. Нет `topic-graph.json` - прогон полный
+`topic-graph.json`, а для записей `projects`/`unclassified` (в графе их нет) - с
+`content_hash` из `taxonomy.json`: файла нет ни в графе, ни среди этих хешей -
+`status: new`, хеш отличается - `changed`, совпал - `unchanged`. Хеши off-domain
+записей пишет `synthesize_taxonomy.py --merge` (в `unclassified.items[]` поле
+`content_hash`, в `projects.items[]` словарь `content_hashes`); старые записи без хеша
+один раз остаются `new`. Нет `topic-graph.json` - прогон полный
 (сверка по кешу невозможна: в нём нет путей). Скан также печатает пути из
 `taxonomy.json`, которых нет в vault (удалённые и переименованные).
 

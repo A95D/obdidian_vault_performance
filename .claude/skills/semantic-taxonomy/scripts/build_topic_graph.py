@@ -1026,13 +1026,21 @@ def entry_path(entry):
     return entry if isinstance(entry, str) else None
 
 
+def layout_paths(map_domain: dict) -> list:
+    """Пути файлов домена из domain-map.json (темы -> files)."""
+    return [p for topic in map_domain.get("topics", []) or [] for p in topic.get("files", []) or []
+            if isinstance(p, str)]
+
+
 def build_layout(graph: dict, taxonomy: dict, structure: dict, merge_map: dict,
-                 affected_ids: set) -> dict:
+                 affected_ids: set, domain_map: dict = None) -> dict:
     """
     Актуальная раскладка файлов по доменам. Источники по возрастанию приоритета:
       1. узлы прежнего графа (уже с переименованными доменами) - старые файлы;
       2. taxonomy.json (id доменов через merge-map): для файлов, которых нет в графе, и
          для затронутых доменов (affected-domains.json) - старые файлы, в т.ч. переехавшие;
+      2б. domain-map.json: раскладка затронутых доменов (после split_domain файлы частей,
+         которым не достался старый id, иначе остались бы в части-наследнице);
       3. vault-structure-analysis.json: дельта и всё, что структура разложила заново.
     Файлы из projects/unclassified структуры в графе не нужны (кроме явного конфликта с
     доменом: домен главнее). Возвращает {"entries", "placement", "off_domain", "moved"}.
@@ -1055,6 +1063,14 @@ def build_layout(graph: dict, taxonomy: dict, structure: dict, merge_map: dict,
             path = entry_path(f)
             if path and (path not in placement or domain_id in affected_ids):
                 placement[path] = domain_id
+
+    for domain in (domain_map or {}).get("domains", []) or []:
+        domain_id = domain.get("id")
+        if not domain_id or domain_id not in affected_ids:
+            continue
+        domain_order.append(domain_id)
+        for path in layout_paths(domain):
+            placement[path] = domain_id
 
     structure_paths = set()
     structure_domains = []
@@ -1191,7 +1207,8 @@ def prepare_incremental(temp_dir: Path, graph: dict):
 
     taxonomy = load_json(temp_dir / "taxonomy.json", {}) or {}
     structure = load_json(temp_dir / "vault-structure-analysis.json", {}) or {}
-    layout = build_layout(graph, taxonomy, structure, merge_map, affected_ids or set())
+    domain_map = load_json(temp_dir / "domain-map.json", {}) or {}
+    layout = build_layout(graph, taxonomy, structure, merge_map, affected_ids or set(), domain_map)
 
     delta_ids = {p for p, st in scan_status.items() if st in DELTA_STATUSES}
     delta_by_domain = {}

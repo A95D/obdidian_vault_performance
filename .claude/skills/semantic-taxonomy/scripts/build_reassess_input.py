@@ -120,6 +120,18 @@ def build_input(entry, taxonomy, domain_map, analysis):
             old_files.append({"path": path, "essence": f.get("essence"),
                               "key_concepts": f.get("key_concepts") or [],
                               "topic_id": topic_of.get(path)})
+    # Файл переехал в домен из другого домена без изменения (add_file, move_topic, merge/split):
+    # его запись берётся из taxonomy.json исходного домена, темы старого домена к нему не относятся.
+    if keep is not None:
+        placed = {f["path"] for f in old_files}
+        records = {f.get("path"): f for dom in taxonomy.get("domains", []) for f in dom.get("files", [])}
+        for path in sorted(keep - placed - set(delta)):
+            f = records.get(path)
+            if f is None:
+                raise ValueError("файл " + str(path) + " стоит в домене " + domain_id + " по domain-map.json, "
+                                 "но его нет ни в taxonomy.json, ни в дельте")
+            old_files.append({"path": path, "essence": f.get("essence"),
+                              "key_concepts": f.get("key_concepts") or [], "topic_id": None})
     summary = analysis.get("domain_summary") or {}
     return {
         "domain_id": domain_id,

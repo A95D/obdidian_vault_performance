@@ -110,6 +110,7 @@ class PatchState:
         self.scan_status = {f["path"]: f.get("status") for f in scan.get("files", [])}
         self.merge_map = {}
         self.affected = {}
+        self.needs_analysis = set()
         self.warnings = []
         self.attach_sources(cards)
 
@@ -352,8 +353,8 @@ def op_move_topic(state, args):
     src["topics"] = [t for t in src["topics"] if t is not topic]
     topic["name"] = new_name
     dst.setdefault("topics", []).append(topic)
-    state.mark(from_id)
-    state.mark(to_id)
+    state.mark(from_id, "move_topic")
+    state.mark(to_id, "move_topic")
 
 
 def merge_topic_into(topics, topic):
@@ -452,6 +453,12 @@ def op_split_domain(state, args):
         new_domains.append(new_dom)
     pos = state.domains.index(dom)
     state.domains[pos:pos + 1] = new_domains
+    # Граф и --merge опираются на merge-map: старый id отображается в часть с наибольшей долей
+    # файлов (при равенстве - первая в parts). Файлы остальных частей граф берёт из раскладки.
+    # Часть, сохранившая старый id, отображения не требует.
+    if dom_id not in part_ids:
+        heir = max(new_domains, key=lambda d: sum(len(t["files"]) for t in d["topics"]))
+        state.merge_map[dom_id] = heir["id"]
     state.remap_affected({dom_id: part_ids})
     for pid in part_ids:
         state.mark(pid, "split")
@@ -473,6 +480,10 @@ def op_classify(state, args):
     if topic is None and not (isinstance(args.get("essence"), str) and args["essence"].strip()):
         raise OpError("темы " + topic_name + " нет в домене " + dom_id + ": для новой темы нужен essence")
     state.detach(path)
+    # У файла из unclassified/projects прежней записи анализа нет (в taxonomy.json у них только
+    # path/reason/suggestion): переносить нечего, домену нужен анализ, даже если файл не менялся.
+    if state.scan_status.get(path) not in DELTA_STATUSES:
+        state.needs_analysis.add(path)
     if topic is None:
         dom.setdefault("topics", []).append(
             {"name": topic_name, "files": [path], "essence": args["essence"], "_src": []})
@@ -493,7 +504,10 @@ def op_to_project(state, args):
         if p.get("name") == project_name:
             target = p
     if target is not None and loc[0] == LOC_PROJECT and loc[1] is target:
-        raise OpError("файл " + path + " уже в проекте " + project_name)
+        # Идемпотентно: файл уже в этом проекте (в скане он new, пока хеши off-domain записей не
+        # записаны, и архитектор по самопроверке называет его в операции). Отклонять патч незачем.
+        state.warnings.append("файл " + path + " уже в проекте " + project_name + ": без изменений")
+        return
     if target is None and not (isinstance(args.get("why"), str) and args["why"].strip()):
         raise OpError("проекта " + project_name + " нет: для нового проекта нужен why")
     state.detach(path)
@@ -645,7 +659,8 @@ def build_affected(state):
         reasons = set(state.affected.get(dom["id"]) or ())
         delta_files = []
         for topic in dom.get("topics", []):
-            delta_files.extend(p for p in topic["files"] if state.scan_status.get(p) in DELTA_STATUSES)
+            delta_files.extend(p for p in topic["files"]
+                               if state.scan_status.get(p) in DELTA_STATUSES or p in state.needs_analysis)
         # Файлы дельты, уже стоящие в карте (не через операции патча), тоже делают домен затронутым.
         if delta_files:
             reasons.add("new_files")

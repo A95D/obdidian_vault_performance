@@ -1253,6 +1253,34 @@ def save_taxonomy_with_backup(temp_dir: Path, taxonomy: dict) -> Path:
     return taxonomy_path
 
 
+def stamp_off_domain_hashes(temp_dir: Path, taxonomy: dict) -> int:
+    """
+    Записать content_hash в записи projects и unclassified (источник - vault-scan.json).
+    unclassified.items[]: поле content_hash; projects.items[]: словарь content_hashes
+    {путь: хеш} (files остаётся списком строк, схема и дашборд не меняются). По этим хешам
+    collect_vault_structure.py --scan --new-only отличает неизменные off-domain файлы от новых.
+    Нет скана или хеша пути - поле не пишется, без ошибки. Возвращает число записанных хешей.
+    """
+    scan = read_json_file(temp_dir / SCAN_FILENAME)
+    if not isinstance(scan, dict):
+        return 0
+    hash_by_path = {e["path"]: e.get("content_hash") for e in scan.get("files", []) or []
+                    if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("content_hash")}
+    stamped = 0
+    for item in section_items(taxonomy.get("unclassified")):
+        if isinstance(item, dict) and item.get("path") in hash_by_path:
+            item["content_hash"] = hash_by_path[item["path"]]
+            stamped += 1
+    for item in section_items(taxonomy.get("projects")):
+        if not isinstance(item, dict):
+            continue
+        hashes = {p: hash_by_path[p] for p in item.get("files") or [] if p in hash_by_path}
+        if hashes:
+            item["content_hashes"] = hashes
+            stamped += len(hashes)
+    return stamped
+
+
 def update_semantic_cache(temp_dir: Path, taxonomy: dict) -> int:
     """
     Инвариант 3f: кеш hash -> {domain_id, essence, key_concepts} обновляется только после
@@ -1360,6 +1388,7 @@ def run_merge(temp_dir: Path, dry_run: bool) -> int:
     taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out, projects, unclassified)
     taxonomy["metadata"]["analyzer_notes"] = "Incremental update: layout, delta and reassessed topics merged into existing taxonomy"
     taxonomy["metadata"]["mode"] = "incremental"
+    stamp_off_domain_hashes(temp_dir, taxonomy)
     for domain in taxonomy["domains"]:
         print("  - " + domain["domain_id"] + ": " + str(domain["file_count"]) + " файлов, тем " +
               str(len(domain["topics"])) + (" (затронут)" if domain["domain_id"] in affected_ids else ""),
@@ -1495,6 +1524,7 @@ def main():
         taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out, projects, unclassified)
         taxonomy['metadata']['analyzer_notes'] = "Full semantic taxonomy based on file content analysis"
         taxonomy['metadata']['mode'] = 'full'
+        stamp_off_domain_hashes(temp_dir, taxonomy)
 
         # Верификация: запись taxonomy.json только если candidates_accounted и files_exist не FAIL
         checks = verify_taxonomy(taxonomy, known_paths, strict_paths)
