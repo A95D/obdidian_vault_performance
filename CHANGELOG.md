@@ -3,6 +3,40 @@
 Все значимые изменения проекта Obsidian Vault Performance задокументированы в этом файле.
 Версионирование следует [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-10-22
+
+Инкрементальный конвейер таксономии: дельта по файлам, переоценка тем затронутых доменов, отправка пакетов в песочницу `llm`. Четыре скрипта инкремента объединены в `incremental.py`.
+
+### Added
+- Фаза 3б: агент `vault-topic-reassessor` пересматривает темы затронутых доменов в инкрементальном прогоне; ответ проверяет `incremental.py validate-topics`
+- `scripts/llm_send.sh` - отправка пакетов файлов в песочницу `llm` с проверкой числа файлов в `llm ls`
+- `llm clean` перед первой передачей файлов прогона: старые результаты не попадают в выборку
+- Инкремент по дельте: `--scan --new-only` сверяет хеш файла, `--merge` работает без LLM, `--merge --full` пересчитывает прогресс всех доменов
+
+### Changed
+- Четыре детерминированных скрипта инкремента влиты в `incremental.py` подкомандами. Алгоритмы, форматы JSON, имена файлов в `temp/` и коды выхода не изменились; в `scripts/` было 10 файлов, стало 6
+- Соответствие команд:
+
+| Было | Стало |
+|---|---|
+| `build_domain_cards.py` | `incremental.py domain-cards` |
+| `apply_domain_patch.py` | `incremental.py apply-patch` |
+| `build_reassess_input.py` | `incremental.py build-reassess-input` |
+| `validate_reassessed_topics.py` | `incremental.py validate-topics --domain ID` |
+
+- Драйвер `incremental.py` (`prepare`, `apply`, `reassess-input`, `finalize`, `status`) - основной путь оркестратора в `SKILL.md`; «Порядок фаз» остаётся справкой
+- Текст ошибки драйвера: `apply-patch завершился с кодом N` вместо `apply_domain_patch завершился с кодом N`
+- Документация: `SKILL.md` (порядок фаз, драйвер, коды выхода), `CLAUDE.md` (таблица «Где что искать», правило 10), `vault-topic-reassessor.md` (шаг 6)
+- `CLAUDE.md` сокращён со 165 до 93 строк без удаления правил: дубли слиты, устаревшие пути убраны, таблица «Где что искать» сверена с репозиторием
+- `README.md`: раздел «Зачем это нужно», актуальное дерево репозитория, ссылки на `vault-topic-reassessor` и `incremental.py`
+- Модель песочницы передаётся явно: `LLM_MODEL=<алиас>` в каждом вызове, алиас выбирается по семейству модели оркестратора
+
+### Removed
+- `build_domain_cards.py`, `apply_domain_patch.py`, `build_reassess_input.py`, `validate_reassessed_topics.py` - заменены подкомандами `incremental.py`
+- `scripts/llm_fetch.sh` - результаты забираются через `llm get` во временной папке (см. `SKILL.md`)
+
+---
+
 ## [1.7.0] - 2026-10-17
 
 Семантические связи в графе тем: рёбра dependency из анализа доменов и вход для vault-relevance-finder.

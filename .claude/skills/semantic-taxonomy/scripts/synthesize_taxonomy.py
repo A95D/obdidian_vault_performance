@@ -6,12 +6,24 @@
   3. Синтез: выявление глобальных фасетов и иерархий
   4-5. Генерация: создание taxonomy.json
   6. Верификация: проверка целостности
+
+Режимы:
+  (без флагов)        полный пересбор по {domain}-analysis.json
+  --merge [--dry-run] слияние раскладки (domain-map.json), дельты и переоценённых тем
+                      затронутых доменов в существующий taxonomy.json без LLM;
+                      --dry-run проверяет инварианты и ничего не пишет
+  --verify [файл]     проверка готового taxonomy.json
+  --temp-dir DIR      директория temp_files (по умолчанию .claude/temp_files проекта)
+
+Запись taxonomy.json только при выполненных инвариантах; перед записью копия
+taxonomy.before.json, кеш semantic-analysis-cache.json обновляется после записи.
 """
 
 import json
 import re
 import sys
 import io
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -211,6 +223,44 @@ def known_paths_from_structure(vault_data: dict):
         if isinstance(f, dict) and isinstance(f.get("path"), str):
             paths.add(f["path"])
     return paths or None
+
+
+def known_paths_from_scan(scan_path: Path):
+    """Все пути vault по vault-scan.json: files + filtered_out. Нет скана или он нечитаем - None."""
+    if not scan_path.exists():
+        return None
+    try:
+        with open(scan_path, "r", encoding="utf-8-sig") as f:
+            scan = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+    if not isinstance(scan, dict):
+        return None
+    paths = set()
+    for key in ("files", "filtered_out"):
+        for f in scan.get(key) or []:
+            if isinstance(f, dict) and isinstance(f.get("path"), str):
+                paths.add(f["path"])
+    return paths or None
+
+
+def check_delta_contract(metadata) -> list:
+    """
+    Контракт delta_only (collect_vault_structure.py): в инкременте domains[].files и all_files -
+    только дельта. Возвращает список ошибок; пустой/нечитаемый metadata - без ошибок
+    (структуры может не быть).
+    """
+    if not isinstance(metadata, dict) or not metadata:
+        return []
+    errors = []
+    mode = metadata.get("mode")
+    delta_only = metadata.get("delta_only")
+    if mode == "incremental" and delta_only is not True:
+        errors.append("mode=incremental без delta_only: рассинхрон версий collect и synthesize, "
+                      "перезапусти --collect --new-only")
+    if delta_only is True and mode != "incremental":
+        errors.append("противоречие: delta_only=true, а mode=" + str(mode) + " (ожидался incremental)")
+    return errors
 
 
 def count_accounted_files(taxonomy: dict):
@@ -888,7 +938,21 @@ def verify_file(taxonomy_path: Path) -> int:
             known_paths = known_paths_from_structure(structure)
             strict_paths = (structure.get("metadata") or {}).get("mode") != "incremental"
         except (json.JSONDecodeError, IOError):
+            structure = None
             known_paths = None
+        if isinstance(structure, dict):
+            delta_errors = check_delta_contract(structure.get("metadata"))
+            if delta_errors:
+                for e in delta_errors:
+                    print(f"[FAIL] контракт delta_only: {e}", file=sys.stderr)
+                return 1
+            if not strict_paths:
+                # Инкремент: all_files - только дельта, поэтому known_paths берём из скана
+                # (все пути vault: кандидаты и шум). strict_paths остаётся False:
+                # удалённые старые файлы - WARN.
+                scan_known = known_paths_from_scan(taxonomy_path.parent / "vault-scan.json")
+                if scan_known:
+                    known_paths = scan_known
     checks = verify_taxonomy(taxonomy, known_paths, strict_paths)
     print_checks(checks)
     failed = [name for name, result in checks.items() if str(result).startswith("FAIL")]
@@ -898,14 +962,494 @@ def verify_file(taxonomy_path: Path) -> int:
     return 0
 
 
+# Имена входов и выходов режима --merge
+TAXONOMY_FILENAME = "taxonomy.json"
+TAXONOMY_BEFORE_FILENAME = "taxonomy.before.json"
+SCAN_FILENAME = "vault-scan.json"
+DOMAIN_MAP_FILENAME = "domain-map.json"
+MERGE_MAP_FILENAME = "domain-merge-map.json"
+AFFECTED_FILENAME = "affected-domains.json"
+GRAPH_FILENAME = "topic-graph.json"
+STRUCTURE_FILENAME = "vault-structure-analysis.json"
+CACHE_FILENAME = "semantic-analysis-cache.json"
+DELTA_STATUSES = ("new", "changed")
+# Производные поля: пересчитываются по всем доменам, из сравнения неизменности исключены
+DERIVED_DOMAIN_FIELDS = ("recommended_topics",)
+DERIVED_TOPIC_FIELDS = ("related_domain_topics",)
+
+
+class MergeError(Exception):
+    """Ошибка входов или раскладки --merge: сообщение печатается как есть, код выхода 1."""
+
+
+def read_json_file(path: Path, default=None):
+    """Прочитать JSON. Отсутствие файла - default, повреждённый файл - MergeError."""
+    if not path.exists():
+        return default
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        raise MergeError("Не читается " + path.name + ": " + str(e))
+
+
+def write_json_file(path: Path, data) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def canonical_json(obj) -> str:
+    """Канонический JSON для сравнения записей (порядок ключей не важен)."""
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False)
+
+
+def resolve_domain_id(domain_id, merge_map: dict):
+    """Старый id домена -> актуальный по domain-merge-map.json (цепочки разворачиваются)."""
+    seen = set()
+    while isinstance(domain_id, str) and domain_id in merge_map and domain_id not in seen:
+        seen.add(domain_id)
+        domain_id = merge_map[domain_id]
+    return domain_id
+
+
+def check_merge_inputs(temp_dir: Path) -> list:
+    """
+    Контракт входов --merge (инвариант 3a): все входы на месте, а topic-graph.json
+    новее vault-scan.json и domain-map.json (граф строится после Фаз 2, 3 и 3б).
+    Возвращает список ошибок (пусто - входы в порядке).
+    """
+    errors = []
+    required = (TAXONOMY_FILENAME, SCAN_FILENAME, DOMAIN_MAP_FILENAME, AFFECTED_FILENAME,
+                GRAPH_FILENAME, STRUCTURE_FILENAME)
+    for name in required:
+        if not (temp_dir / name).exists():
+            errors.append("Нет входа " + name + " (" + str(temp_dir / name) + ")")
+    graph_path = temp_dir / GRAPH_FILENAME
+    if graph_path.exists():
+        graph_mtime = graph_path.stat().st_mtime
+        for name in (SCAN_FILENAME, DOMAIN_MAP_FILENAME):
+            path = temp_dir / name
+            if path.exists() and graph_mtime < path.stat().st_mtime:
+                errors.append(GRAPH_FILENAME + " старше " + name +
+                              ": пересобери граф (build_topic_graph.py) после Фаз 1-3б")
+    return errors
+
+
+def load_validated_topics(temp_dir: Path, domain_id: str) -> dict:
+    """{domain_id}-topics.validated.json затронутого домена (Фаза 3б). Нет файла - MergeError."""
+    name = domain_id + "-topics.validated.json"
+    doc = read_json_file(temp_dir / name)
+    if doc is None:
+        raise MergeError("Затронутый домен " + domain_id + ": нет " + name + " (Фаза 3б не выполнена)")
+    if not isinstance(doc, dict) or not isinstance(doc.get("topics"), list) or not doc["topics"]:
+        raise MergeError(name + ": нет непустого списка topics")
+    return doc
+
+
+def pick_file_record(path: str, domain_id: str, delta_paths: set, old_by_path: dict,
+                     analysis_by_domain: dict, warnings: list) -> dict:
+    """
+    Запись файла для сборки домена. Дельта (status new|changed) - из {domain}-analysis.json,
+    остальные - прежняя запись из taxonomy.json (в т.ч. из другого домена, если файл переехал).
+    Файл, которого нет в taxonomy.json и нет в дельте, берётся из анализа с предупреждением.
+    """
+    analysed = (analysis_by_domain.get(domain_id) or {}).get(path)
+    if analysed is None:
+        for records in analysis_by_domain.values():
+            if path in records:
+                analysed = records[path]
+                break
+    old = old_by_path.get(path)
+    if path in delta_paths:
+        if analysed is not None:
+            return analysed
+        if old is not None:
+            warnings.append("нет анализа для файла дельты, оставлена прежняя запись: " + path)
+            return old
+        raise MergeError("Нет записи файла " + path + ": он в дельте (new|changed), но не найден ни в одном "
+                         "{domain}-analysis.json, ни в taxonomy.json")
+    if old is not None:
+        return old
+    if analysed is not None:
+        warnings.append("файла нет в taxonomy.json, запись взята из анализа: " + path)
+        return analysed
+    raise MergeError("Нет записи файла " + path + ": его нет ни в taxonomy.json, ни в {domain}-analysis.json")
+
+
+def layout_domain_paths(map_domain: dict) -> list:
+    """Пути файлов домена из domain-map.json в порядке тем, без повторов."""
+    paths = []
+    for topic in map_domain.get("topics", []) or []:
+        for p in topic.get("files", []) or []:
+            if isinstance(p, str) and p not in paths:
+                paths.append(p)
+    return paths
+
+
+def build_merged_analysis(temp_dir: Path, existing: dict, domain_map: dict, merge_map: dict,
+                          affected_ids: set, scan_status: dict, warnings: list):
+    """
+    Собрать analysis_data для generate_taxonomy_json из актуальной раскладки (domain-map.json).
+    Затронутый домен: files = старые записи из taxonomy.json плюс дельта, темы и description из
+    {domain}-topics.validated.json. Незатронутый: запись taxonomy.json как есть.
+    Возвращает (analysis_data, old_domains_by_new_id).
+    """
+    delta_paths = {p for p, st in scan_status.items() if st in DELTA_STATUSES}
+    old_by_path = {}
+    old_by_new_id = {}
+    for old_dom in existing.get("domains", []) or []:
+        new_id = resolve_domain_id(old_dom.get("domain_id"), merge_map)
+        old_by_new_id.setdefault(new_id, []).append(old_dom)
+        for f in old_dom.get("files", []) or []:
+            if isinstance(f, dict) and isinstance(f.get("path"), str):
+                old_by_path.setdefault(f["path"], f)
+
+    analysis_raw = load_analysis_files(temp_dir)
+    analysis_by_domain = {}
+    for key, data in analysis_raw.items():
+        analysis_by_domain[key] = {f["path"]: f for f in data.get("files", []) or []
+                                   if isinstance(f, dict) and isinstance(f.get("path"), str)}
+
+    merged = {}
+    for map_dom in domain_map.get("domains", []) or []:
+        domain_id = map_dom.get("id")
+        if not isinstance(domain_id, str) or not domain_id:
+            raise MergeError("domain-map.json: домен без id")
+        if domain_id in merged:
+            raise MergeError("domain-map.json: повтор домена " + domain_id)
+        old_doms = old_by_new_id.get(domain_id, [])
+        if domain_id in affected_ids:
+            validated = load_validated_topics(temp_dir, domain_id)
+            files = []
+            for path in layout_domain_paths(map_dom):
+                files.append(pick_file_record(path, domain_id, delta_paths, old_by_path,
+                                              analysis_by_domain, warnings))
+            description = validated.get("description") or \
+                (old_doms[0].get("description") if len(old_doms) == 1 else "") or map_dom.get("purpose", "")
+            merged[domain_id] = {
+                "files": files,
+                "domain_name": map_dom.get("name") or domain_id,
+                "description": description,
+                "domain_summary": {"topics": validated["topics"]},
+            }
+        else:
+            if len(old_doms) != 1:
+                raise MergeError("Домен " + domain_id + " не в " + AFFECTED_FILENAME + ", но "
+                                 + ("его нет в taxonomy.json" if not old_doms else
+                                    "в него слиты несколько доменов taxonomy.json")
+                                 + ": такой домен должен быть затронутым")
+            old_dom = old_doms[0]
+            renamed = old_dom.get("domain_id") != domain_id
+            merged[domain_id] = {
+                "files": old_dom.get("files", []),
+                "domain_name": (map_dom.get("name") or domain_id) if renamed
+                else old_dom.get("domain_name", domain_id),
+                "description": old_dom.get("description", ""),
+                "domain_summary": {"topics": old_dom.get("topics", [])},
+            }
+    return merged, old_by_new_id
+
+
+def strip_derived(domain: dict, drop_identity: bool = False) -> dict:
+    """Копия записи домена без производных полей (и без id/названия, если домен переименован)."""
+    copy_ = json.loads(json.dumps(domain))
+    for field in DERIVED_DOMAIN_FIELDS:
+        copy_.pop(field, None)
+    if drop_identity:
+        copy_.pop("domain_id", None)
+        copy_.pop("domain_name", None)
+    for topic in copy_.get("topics", []) or []:
+        if isinstance(topic, dict):
+            for field in DERIVED_TOPIC_FIELDS:
+                topic.pop(field, None)
+    return copy_
+
+
+def check_unaffected_unchanged(taxonomy: dict, existing_snapshot: dict, old_by_new_id: dict,
+                               affected_ids: set, merge_map: dict) -> list:
+    """
+    Инвариант 3c: записи доменов вне affected-domains.json совпадают с прежними
+    (канонический JSON), кроме recommended_topics и related_domain_topics.
+    У переименованного домена не сравниваются domain_id и domain_name. Прежний домен,
+    пропавший из итога без слияния/переименования, тоже ошибка.
+    """
+    errors = []
+    new_by_id = {d["domain_id"]: d for d in taxonomy.get("domains", [])}
+    for old_dom in existing_snapshot.get("domains", []) or []:
+        old_id = old_dom.get("domain_id")
+        new_id = resolve_domain_id(old_id, merge_map)
+        if new_id in affected_ids:
+            continue
+        new_dom = new_by_id.get(new_id)
+        if new_dom is None:
+            errors.append("Домен " + str(old_id) + " пропал из taxonomy.json, хотя не затронут (нет в domain-map.json)")
+            continue
+        renamed = new_id != old_id
+        if canonical_json(strip_derived(old_dom, renamed)) != canonical_json(strip_derived(new_dom, renamed)):
+            errors.append("Незатронутый домен " + str(new_id) + " изменился относительно прежней taxonomy.json")
+    return errors
+
+
+def check_layout_matches_old(domain_map: dict, old_by_new_id: dict, affected_ids: set) -> list:
+    """Раскладка незатронутого домена в domain-map.json обязана совпадать с его файлами в taxonomy.json."""
+    errors = []
+    for map_dom in domain_map.get("domains", []) or []:
+        domain_id = map_dom.get("id")
+        old_doms = old_by_new_id.get(domain_id, [])
+        if domain_id in affected_ids or len(old_doms) != 1:
+            continue
+        old_paths = {f["path"] for f in old_doms[0].get("files", []) if isinstance(f, dict) and "path" in f}
+        new_paths = set(layout_domain_paths(map_dom))
+        if old_paths != new_paths:
+            errors.append("Домен " + str(domain_id) + " не в " + AFFECTED_FILENAME +
+                          ", но его файлы в domain-map.json отличаются от taxonomy.json (добавлено " +
+                          str(len(new_paths - old_paths)) + ", убрано " + str(len(old_paths - new_paths)) + ")")
+    return errors
+
+
+def check_topic_consistency(taxonomy: dict) -> list:
+    """
+    Инвариант 3d: has_notes == bool(note_paths), каждый note_path есть среди файлов домена,
+    каждый файл домена привязан хотя бы к одной теме (файл может подкреплять несколько тем).
+    """
+    errors = []
+    for domain in taxonomy.get("domains", []) or []:
+        domain_id = domain.get("domain_id")
+        file_paths = [f["path"] for f in domain.get("files", []) if isinstance(f, dict) and "path" in f]
+        file_set = set(file_paths)
+        owners = {}
+        for topic in domain.get("topics", []) or []:
+            if not isinstance(topic, dict):
+                continue
+            tid = topic.get("topic_id")
+            note_paths = topic.get("note_paths") or []
+            if bool(topic.get("has_notes")) != bool(note_paths):
+                errors.append(str(domain_id) + ":" + str(tid) + ": has_notes=" +
+                              json.dumps(topic.get("has_notes")) + ", а note_paths " +
+                              ("пуст" if not note_paths else "непуст"))
+            for p in note_paths:
+                if p not in file_set:
+                    errors.append(str(domain_id) + ":" + str(tid) + ": note_path не из файлов домена: " + str(p))
+                owners.setdefault(p, []).append(tid)
+        for p in file_paths:
+            count = len(owners.get(p, []))
+            if count == 0:
+                errors.append(str(domain_id) + ": файл не привязан ни к одной теме: " + p)
+    return errors
+
+
+def failed_checks(checks: dict) -> list:
+    return [name for name, result in checks.items() if str(result).startswith("FAIL")]
+
+
+def save_taxonomy_with_backup(temp_dir: Path, taxonomy: dict) -> Path:
+    """Инвариант 3e: перед записью taxonomy.json копия прежнего файла в taxonomy.before.json."""
+    taxonomy_path = temp_dir / TAXONOMY_FILENAME
+    if taxonomy_path.exists():
+        shutil.copy2(taxonomy_path, temp_dir / TAXONOMY_BEFORE_FILENAME)
+        print("[BACKUP] " + TAXONOMY_BEFORE_FILENAME, file=sys.stderr)
+    write_json_file(taxonomy_path, taxonomy)
+    print("\n[SAVE] Сохранено: " + str(taxonomy_path), file=sys.stderr)
+    return taxonomy_path
+
+
+def stamp_off_domain_hashes(temp_dir: Path, taxonomy: dict) -> int:
+    """
+    Записать content_hash в записи projects и unclassified (источник - vault-scan.json).
+    unclassified.items[]: поле content_hash; projects.items[]: словарь content_hashes
+    {путь: хеш} (files остаётся списком строк, схема и дашборд не меняются). По этим хешам
+    collect_vault_structure.py --scan --new-only отличает неизменные off-domain файлы от новых.
+    Нет скана или хеша пути - поле не пишется, без ошибки. Возвращает число записанных хешей.
+    """
+    scan = read_json_file(temp_dir / SCAN_FILENAME)
+    if not isinstance(scan, dict):
+        return 0
+    hash_by_path = {e["path"]: e.get("content_hash") for e in scan.get("files", []) or []
+                    if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("content_hash")}
+    stamped = 0
+    for item in section_items(taxonomy.get("unclassified")):
+        if isinstance(item, dict) and item.get("path") in hash_by_path:
+            item["content_hash"] = hash_by_path[item["path"]]
+            stamped += 1
+    for item in section_items(taxonomy.get("projects")):
+        if not isinstance(item, dict):
+            continue
+        hashes = {p: hash_by_path[p] for p in item.get("files") or [] if p in hash_by_path}
+        if hashes:
+            item["content_hashes"] = hashes
+            stamped += len(hashes)
+    return stamped
+
+
+def update_semantic_cache(temp_dir: Path, taxonomy: dict) -> int:
+    """
+    Инвариант 3f: кеш hash -> {domain_id, essence, key_concepts} обновляется только после
+    успешной записи taxonomy.json. Хеши путей берутся из vault-scan.json, domain_id в кеше
+    приводится к актуальному по domain-merge-map.json. Возвращает число записанных записей.
+    """
+    scan = read_json_file(temp_dir / SCAN_FILENAME)
+    if not isinstance(scan, dict):
+        print("[WARN] Нет " + SCAN_FILENAME + ": кеш " + CACHE_FILENAME + " не обновлён", file=sys.stderr)
+        return 0
+    hash_by_path = {e["path"]: e.get("content_hash") for e in scan.get("files", []) or []
+                    if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    cache = read_json_file(temp_dir / CACHE_FILENAME, {})
+    if not isinstance(cache, dict):
+        cache = {}
+    updated = 0
+    for domain in taxonomy.get("domains", []) or []:
+        for f in domain.get("files", []) or []:
+            if not isinstance(f, dict):
+                continue
+            content_hash = hash_by_path.get(f.get("path"))
+            if not content_hash:
+                continue
+            cache[content_hash] = {
+                "domain_id": domain["domain_id"],
+                "essence": f.get("essence", ""),
+                "key_concepts": f.get("key_concepts", []) or [],
+            }
+            updated += 1
+    merge_map = read_json_file(temp_dir / MERGE_MAP_FILENAME, {}) or {}
+    if merge_map:
+        for entry in cache.values():
+            if isinstance(entry, dict) and entry.get("domain_id") in merge_map:
+                entry["domain_id"] = resolve_domain_id(entry["domain_id"], merge_map)
+    write_json_file(temp_dir / CACHE_FILENAME, cache)
+    suffix = (", применено слияний: " + str(len(merge_map))) if merge_map else ""
+    print("[OK] Кеш обновлён после записи taxonomy.json: " + str(updated) + " записей" + suffix, file=sys.stderr)
+    return updated
+
+
+def run_merge(temp_dir: Path, dry_run: bool) -> int:
+    """
+    Фаза 5: слияние в taxonomy.json без LLM. Раскладка - domain-map.json, затронутые домены -
+    affected-domains.json и {domain}-topics.validated.json, дельта - {domain}-analysis.json.
+    Запись taxonomy.json только если инварианты 3a-3d выполнены. Коды выхода: 0 - OK,
+    1 - нарушен инвариант, 2 - нет входов или они устарели.
+    """
+    print("\n[MERGE] Режим: INCREMENTAL MERGE (--merge)" + (" --dry-run" if dry_run else ""), file=sys.stderr)
+
+    errors = check_merge_inputs(temp_dir)
+    if errors:
+        for e in errors:
+            print("[FAIL] контракт входов: " + e, file=sys.stderr)
+        print("[FAIL] --merge не запущен, taxonomy.json не изменён", file=sys.stderr)
+        return 2
+
+    existing = read_json_file(temp_dir / TAXONOMY_FILENAME)
+    existing_snapshot = json.loads(json.dumps(existing))
+    domain_map = read_json_file(temp_dir / DOMAIN_MAP_FILENAME)
+    scan = read_json_file(temp_dir / SCAN_FILENAME)
+    structure = read_json_file(temp_dir / STRUCTURE_FILENAME)
+    delta_errors = check_delta_contract(structure.get("metadata") if isinstance(structure, dict) else None)
+    if delta_errors:
+        for e in delta_errors:
+            print("[FAIL] контракт delta_only: " + e, file=sys.stderr)
+        print("[FAIL] --merge не запущен, taxonomy.json не изменён", file=sys.stderr)
+        return 2
+    affected_raw = read_json_file(temp_dir / AFFECTED_FILENAME)
+    merge_map = read_json_file(temp_dir / MERGE_MAP_FILENAME, {}) or {}
+    if not isinstance(merge_map, dict):
+        merge_map = {}
+
+    scan_files = scan.get("files") if isinstance(scan, dict) else None
+    if not isinstance(scan_files, list):
+        raise MergeError(SCAN_FILENAME + " не читается или без списка files")
+    scan_status = {e["path"]: e.get("status") for e in scan_files
+                   if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    if any(st not in ("new", "changed", "unchanged") for st in scan_status.values()):
+        raise MergeError(SCAN_FILENAME + ": у файлов нет status new|changed|unchanged (перезапусти --scan)")
+    affected_ids = {resolve_domain_id(d.get("domain_id"), merge_map)
+                    for d in (affected_raw or {}).get("domains", []) or []
+                    if isinstance(d, dict) and d.get("domain_id")}
+    print("[MERGE] Затронутые домены: " + (", ".join(sorted(affected_ids)) or "нет"), file=sys.stderr)
+
+    warnings = []
+    analysis_data, old_by_new_id = build_merged_analysis(
+        temp_dir, existing, domain_map, merge_map, affected_ids, scan_status, warnings)
+    for w in warnings:
+        print("[WARN] " + w, file=sys.stderr)
+
+    layout_errors = check_layout_matches_old(domain_map, old_by_new_id, affected_ids)
+
+    metadata_struct = structure.get("metadata", {}) if isinstance(structure, dict) else {}
+    filtered_out = (structure or {}).get("filtered_out") or existing.get("filtered_out")
+    # domain-map.json после incremental.py apply-patch - полная раскладка, включая projects/unclassified
+    projects = normalize_projects_section(
+        domain_map["projects"] if domain_map.get("projects") is not None else existing.get("projects"))
+    unclassified = normalize_unclassified_section(
+        domain_map["unclassified"] if domain_map.get("unclassified") is not None else existing.get("unclassified"))
+    all_files_count = resolve_all_files_count(metadata_struct, filtered_out, existing, True)
+    metadata = dict(existing.get("metadata", {}))
+    if isinstance(all_files_count, int):
+        metadata["all_files_count"] = all_files_count
+
+    taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out, projects, unclassified)
+    taxonomy["metadata"]["analyzer_notes"] = "Incremental update: layout, delta and reassessed topics merged into existing taxonomy"
+    taxonomy["metadata"]["mode"] = "incremental"
+    stamp_off_domain_hashes(temp_dir, taxonomy)
+    for domain in taxonomy["domains"]:
+        print("  - " + domain["domain_id"] + ": " + str(domain["file_count"]) + " файлов, тем " +
+              str(len(domain["topics"])) + (" (затронут)" if domain["domain_id"] in affected_ids else ""),
+              file=sys.stderr)
+
+    # Инвариант 3b: арифметика покрытия и сверка путей перед записью
+    known_paths = set(scan_status) | {f["path"] for f in scan.get("filtered_out", []) or []
+                                      if isinstance(f, dict) and isinstance(f.get("path"), str)}
+    checks = verify_taxonomy(taxonomy, known_paths, False)
+    # Удалённые из vault старые файлы остаются предупреждением (SKILL.md), а путь, которого
+    # не было ни в прежней таксономии, ни в скане, - опечатка раскладки и ошибка
+    old_paths = collect_accounted_paths(existing_snapshot)
+    typos = sorted(collect_accounted_paths(taxonomy) - known_paths - old_paths)
+    if typos:
+        checks["files_exist"] = "FAIL: " + str(len(typos)) + " новых путей нет в vault: " + ", ".join(typos[:3])
+    print_checks(checks)
+
+    problems = []
+    for name in failed_checks(checks):
+        problems.append("проверка " + name + ": " + str(checks[name]))
+    problems += ["неизменность незатронутого: " + e for e in layout_errors]
+    problems += ["неизменность незатронутого: " + e for e in
+                 check_unaffected_unchanged(taxonomy, existing_snapshot, old_by_new_id, affected_ids, merge_map)]
+    problems += ["согласованность тем: " + e for e in check_topic_consistency(taxonomy)]
+    if problems:
+        for p in problems:
+            print("[FAIL] " + p, file=sys.stderr)
+        print("[FAIL] Нарушено инвариантов: " + str(len(problems)) + ". taxonomy.json и кеш не изменены", file=sys.stderr)
+        return 1
+
+    if dry_run:
+        print("[DRY-RUN] Инварианты выполнены: доменов " + str(len(taxonomy["domains"])) + ", файлов " +
+              str(taxonomy["statistics"]["total_files"]) + ". Ничего не записано", file=sys.stderr)
+        return 0
+
+    save_taxonomy_with_backup(temp_dir, taxonomy)
+    update_semantic_cache(temp_dir, taxonomy)
+    print("\n[SUCCESS] Слияние в taxonomy.json завершено", file=sys.stderr)
+    return 0
+
+
+def option_value(flag: str):
+    """Значение аргумента '--flag <значение>'. None, если флага нет."""
+    if flag in sys.argv:
+        pos = sys.argv.index(flag) + 1
+        if pos < len(sys.argv) and not sys.argv[pos].startswith("-"):
+            return sys.argv[pos]
+    return None
+
+
 def main():
     """Главный поток синтеза."""
 
     try:
-        project_root = get_project_root()
-        temp_dir = project_root / ".claude" / "temp_files"
-
-        print(f"[INFO] Корень проекта: {project_root}", file=sys.stderr)
+        temp_dir_arg = option_value("--temp-dir")
+        if temp_dir_arg:
+            temp_dir = Path(temp_dir_arg)
+        else:
+            project_root = get_project_root()
+            temp_dir = project_root / ".claude" / "temp_files"
+            print(f"[INFO] Корень проекта: {project_root}", file=sys.stderr)
         print(f"[INFO] Директория temp_files: {temp_dir}", file=sys.stderr)
 
         if "--verify" in sys.argv:
@@ -914,8 +1458,18 @@ def main():
             target = Path(after[0]) if after and not after[0].startswith("-") else temp_dir / "taxonomy.json"
             return verify_file(target)
 
-        # Данные Фазы 1 нужны и ранним выходам (дописывают секции
-        # projects/unclassified в готовый файл), поэтому читаются до них
+        merge_mode = "--merge" in sys.argv
+        dry_run = "--dry-run" in sys.argv
+        if dry_run and not merge_mode:
+            print("[ERROR] --dry-run поддерживается только вместе с --merge", file=sys.stderr)
+            return 1
+
+        if merge_mode:
+            if (temp_dir / TAXONOMY_FILENAME).exists():
+                return run_merge(temp_dir, dry_run)
+            print(f"[WARN] Файл taxonomy.json не найден. Переключение на полный режим.", file=sys.stderr)
+
+        # Данные Фазы 1 полного прогона
         vault_structure_file = temp_dir / "vault-structure-analysis.json"
         metadata = {}
         filtered_out = None
@@ -933,58 +1487,17 @@ def main():
             except (json.JSONDecodeError, IOError) as e:
                 print(f"[WARN] Ошибка чтения {vault_structure_file.name}: {e}", file=sys.stderr)
 
-        # Пути файлов vault для сверки учтённых файлов с настоящими.
-        # Полный прогон - скан свежий, расхождение это опечатка; инкрементальный
-        # оставляет удалённые файлы законно, там расхождение не ошибка.
+        # Пути файлов vault для сверки учтённых файлов с настоящими: в полном
+        # прогоне скан свежий, расхождение это опечатка
         known_paths = known_paths_from_structure(vault_data)
         strict_paths = (metadata.get("mode") != "incremental")
+        delta_errors = check_delta_contract(metadata)
+        if delta_errors:
+            for e in delta_errors:
+                print(f"[ERROR] контракт delta_only: {e}", file=sys.stderr)
+            return 1
 
-        # Проверить режим
-        merge_mode = "--merge" in sys.argv
-        full_dirty_mode = "--full" in sys.argv
-        existing_taxonomy = None
-        dirty_domains_list = None  # None = не ограничивать (нет graph-dirty-domains.json)
-
-        if merge_mode:
-            print(f"\n[MERGE] Режим: INCREMENTAL MERGE (--merge)", file=sys.stderr)
-            existing_taxonomy = load_existing_taxonomy(temp_dir)
-
-            if not existing_taxonomy:
-                print(f"[WARN] Файл taxonomy.json не найден. Переключение на полный режим.", file=sys.stderr)
-                merge_mode = False
-            else:
-                print(f"[OK] Загружена существующая таксономия ({existing_taxonomy['metadata']['total_files']} файлов)", file=sys.stderr)
-
-                # T010/T011/T022: сузить пересчёт до dirty-доменов, если граф тем
-                # уже построен в этом прогоне (build_topic_graph.py). --full здесь
-                # означает "считать все домены dirty" (research.md п.4).
-                if full_dirty_mode:
-                    print("[MERGE] --full: пересчитываются все домены (графовый dirty-фильтр не применяется)", file=sys.stderr)
-                else:
-                    dirty_data = load_dirty_domains(temp_dir)
-                    if dirty_data is None:
-                        print("[MERGE] graph-dirty-domains.json не найден - дерево dirty-доменов не сужает пересчёт", file=sys.stderr)
-                    else:
-                        dirty_domains_list = dirty_data.get("dirty_domains", []) or []
-                        if not dirty_domains_list:
-                            # T011: пустой dirty_domains - пересчитывать нечего (data-model.md)
-                            print("[MERGE] dirty_domains пуст - нечего пересчитывать, taxonomy.json не изменяется", file=sys.stderr)
-                            if backfill_non_domain_sections(
-                                    existing_taxonomy, projects, unclassified,
-                                    resolve_all_files_count(
-                                        metadata, filtered_out or existing_taxonomy.get("filtered_out"),
-                                        existing_taxonomy, True)):
-                                print("[INFO] В taxonomy.json дописаны секции projects/unclassified и счётчики покрытия", file=sys.stderr)
-                            print_checks(verify_taxonomy(existing_taxonomy, known_paths, strict_paths))
-                            existing_taxonomy['metadata']['analysis_date'] = datetime.now().strftime("%Y-%m-%d")
-                            taxonomy_path = temp_dir / "taxonomy.json"
-                            with open(taxonomy_path, "w", encoding="utf-8") as f:
-                                json.dump(existing_taxonomy, f, indent=2, ensure_ascii=False)
-                            print(f"[SAVE] Сохранено без изменений: {taxonomy_path}", file=sys.stderr)
-                            return 0
-                        print(f"[MERGE] Dirty-домены этого прогона: {', '.join(dirty_domains_list)}", file=sys.stderr)
-        else:
-            print(f"\n[FULL] Режим: FULL (полный пересбор)", file=sys.stderr)
+        print(f"\n[FULL] Режим: FULL (полный пересбор)", file=sys.stderr)
 
         # === ФАЗА 3-6 ===
         print("\n[PROCESS] Фаза 3-6: Синтез, проектирование, генерация, верификация...",
@@ -993,135 +1506,45 @@ def main():
         # Загрузить анализы
         analysis_data = load_analysis_files(temp_dir)
         if not analysis_data:
-            if merge_mode:
-                print("[INFO] Файлы анализа не найдены. Сохранение существующей таксономии без изменений.", file=sys.stderr)
-                if backfill_non_domain_sections(
-                        existing_taxonomy, projects, unclassified,
-                        resolve_all_files_count(
-                            metadata, filtered_out or existing_taxonomy.get("filtered_out"),
-                            existing_taxonomy, True)):
-                    print("[INFO] В taxonomy.json дописаны секции projects/unclassified и счётчики покрытия", file=sys.stderr)
-                print_checks(verify_taxonomy(existing_taxonomy, known_paths, strict_paths))
-                # Обновить дату анализа и сохранить
-                existing_taxonomy['metadata']['analysis_date'] = datetime.now().strftime("%Y-%m-%d")
-                existing_taxonomy['metadata']['analyzer_notes'] = "Incremental update: no new files to merge"
-                taxonomy_path = temp_dir / "taxonomy.json"
-                with open(taxonomy_path, "w", encoding="utf-8") as f:
-                    json.dump(existing_taxonomy, f, indent=2, ensure_ascii=False)
-                print(f"[SAVE] Сохранено: {taxonomy_path}", file=sys.stderr)
-                return 0
-            else:
-                print("[ERROR] Файлы анализа доменов не найдены", file=sys.stderr)
-                return 1
+            print("[ERROR] Файлы анализа доменов не найдены", file=sys.stderr)
+            return 1
 
-        # T010: если граф тем ограничил пересчёт dirty-доменами - отбросить
-        # анализы доменов, не входящих в dirty_domains (защита от случайных
-        # остаточных {domain}-analysis.json файлов прошлых прогонов в temp_files)
-        if merge_mode and dirty_domains_list is not None:
-            skipped = [d for d in analysis_data if d not in dirty_domains_list]
-            analysis_data = {d: v for d, v in analysis_data.items() if d in dirty_domains_list}
-            if skipped:
-                print(f"[MERGE] Пропущены анализы не-dirty доменов: {', '.join(skipped)}", file=sys.stderr)
+        print(f"[OK] Загружено {len(analysis_data)} доменов для анализа", file=sys.stderr)
 
-        print(f"[OK] Загружено {len(analysis_data)} новых доменов для анализа", file=sys.stderr)
-
-        if filtered_out is None and merge_mode and existing_taxonomy:
-            # Инкрементальный прогон без нового Фазы 1 - сохранить прежний список шума
-            filtered_out = existing_taxonomy.get("filtered_out")
-
-        # Проекты и нераспознанные файлы: в полном прогоне берём этот прогон,
-        # в инкрементальном сливаем с прежней taxonomy.json, иначе старые
-        # записи (уже учтённые файлы) из неё бы выпали.
-        if merge_mode and existing_taxonomy:
-            projects = merge_projects_sections(existing_taxonomy.get("projects"), projects)
-            unclassified = merge_unclassified_sections(existing_taxonomy.get("unclassified"), unclassified)
-        else:
-            projects = normalize_projects_section(projects)
-            unclassified = normalize_unclassified_section(unclassified)
+        projects = normalize_projects_section(projects)
+        unclassified = normalize_unclassified_section(unclassified)
 
         # Сколько .md в vault должна покрывать итоговая taxonomy.json - база
         # для проверки candidates_accounted.
-        all_files_count = resolve_all_files_count(
-            metadata, filtered_out, existing_taxonomy, merge_mode)
-        structure_metadata = dict(metadata)
+        all_files_count = resolve_all_files_count(metadata, filtered_out, None, False)
+        metadata = dict(metadata)
         if isinstance(all_files_count, int):
-            structure_metadata["all_files_count"] = all_files_count
-
-        # Генерировать таксономию
-        if merge_mode:
-            print(f"\n[MERGE] Объединение анализов с существующей таксономией...", file=sys.stderr)
-            # Объединить новые анализы с существующей таксономией
-            merged_analysis = {}
-
-            # Копируем все домены из существующей таксономии
-            for domain in existing_taxonomy.get("domains", []):
-                domain_id = domain["domain_id"]
-                existing_files = domain.get("files", [])
-                # Темы из предыдущей сборки (уже в финальном формате taxonomy.json)
-                existing_topics = domain.get("topics", [])
-
-                # Если новый анализ есть для этого домена, мёржим
-                if domain_id in analysis_data:
-                    new_files = analysis_data[domain_id].get("files", [])
-                    merged_files = merge_domain_files(existing_files, new_files)
-                    new_topics = get_domain_topics(analysis_data[domain_id])
-                    merged_analysis[domain_id] = {
-                        "files": merged_files,
-                        "domain_name": domain.get("domain_name", domain_id),
-                        "description": domain.get("description", ""),
-                        # Новый анализ домена полностью переопределяет темы (пересчитаны заново)
-                        "domain_summary": {"topics": new_topics if new_topics else existing_topics}
-                    }
-                    print(f"  - {domain_id}: {len(existing_files)} -> {len(merged_files)} файлов", file=sys.stderr)
-                else:
-                    # Сохраняем домен как есть, включая ранее построенные темы
-                    merged_analysis[domain_id] = {
-                        "files": existing_files,
-                        "domain_name": domain.get("domain_name", domain_id),
-                        "description": domain.get("description", ""),
-                        "domain_summary": {"topics": existing_topics}
-                    }
-
-            # Добавляем новые домены если их не было
-            for domain_id, domain_data in analysis_data.items():
-                if domain_id not in merged_analysis:
-                    merged_analysis[domain_id] = domain_data
-                    print(f"  - {domain_id}: новый домен с {len(domain_data.get('files', []))} файлами", file=sys.stderr)
-
-            analysis_data = merged_analysis
-
-        # В merge-режиме сохраняем прежние метаданные (путь, дата), но счётчики
-        # и базу покрытия - пересчитанные в этом прогоне.
-        metadata = structure_metadata
-        if merge_mode and existing_taxonomy:
-            metadata = dict(existing_taxonomy.get("metadata", metadata))
-            if isinstance(all_files_count, int):
-                metadata["all_files_count"] = all_files_count
+            metadata["all_files_count"] = all_files_count
 
         taxonomy = generate_taxonomy_json(analysis_data, metadata, filtered_out, projects, unclassified)
+        taxonomy['metadata']['analyzer_notes'] = "Full semantic taxonomy based on file content analysis"
+        taxonomy['metadata']['mode'] = 'full'
+        stamp_off_domain_hashes(temp_dir, taxonomy)
 
-        # Верификация
+        # Верификация: запись taxonomy.json только если candidates_accounted и files_exist не FAIL
         checks = verify_taxonomy(taxonomy, known_paths, strict_paths)
         print_checks(checks)
+        failed = failed_checks(checks)
+        if failed:
+            print(f"[FAIL] Провалено проверок: {len(failed)} - {', '.join(failed)}. "
+                  "taxonomy.json и кеш не изменены", file=sys.stderr)
+            return 1
 
-        # Обновить metadata если merge режим
-        if merge_mode:
-            new_files_count = len(analysis_data) if isinstance(analysis_data, dict) else len([f for domain in analysis_data.values() for f in domain.get('files', [])])
-            taxonomy['metadata']['analyzer_notes'] = f"Incremental update: new files merged into existing taxonomy"
-            taxonomy['metadata']['mode'] = 'incremental'
-        else:
-            taxonomy['metadata']['analyzer_notes'] = "Full semantic taxonomy based on file content analysis"
-            taxonomy['metadata']['mode'] = 'full'
-
-        # Сохранить taxonomy.json
-        taxonomy_path = temp_dir / "taxonomy.json"
-        with open(taxonomy_path, "w", encoding="utf-8") as f:
-            json.dump(taxonomy, f, indent=2, ensure_ascii=False)
-        print(f"\n[SAVE] Сохранено: {taxonomy_path}", file=sys.stderr)
+        # Сохранить taxonomy.json (с копией прежнего в taxonomy.before.json), затем обновить кеш
+        save_taxonomy_with_backup(temp_dir, taxonomy)
+        update_semantic_cache(temp_dir, taxonomy)
 
         print("\n[SUCCESS] Синтез таксономии завершён", file=sys.stderr)
         return 0
 
+    except MergeError as e:
+        print(f"[FAIL] {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"[ERROR] Ошибка: {e}", file=sys.stderr)
         import traceback

@@ -4,19 +4,23 @@
 
 Два режима, вызываемые последовательно одним и тем же скриптом.
 
-  --scan [--new-only]
+  --scan [--new-only [--baseline-taxonomy]] [--temp-dir DIR]
       Сканирует все .md файлы vault и прогоняет их через дешёвый
       эвристический пре-фильтр шума (без LLM): служебные папки, пустые
       заметки, заметки состоящие только из вставок изображений. Сверяет
       content-hash с кешем, чтобы отделить новое от неизменившегося.
       Выход: .claude/temp_files/vault-scan.json.
 
-  --collect [--new-only]
+  --collect [--new-only] [--temp-dir DIR]
       После того как vault-domain-architect отработал и записал
       .claude/temp_files/domain-map.json, собирает финальную структуру
-      файл -> домен -> тема. Обновляет кеш и применяет
-      .claude/temp_files/domain-merge-map.json, если карта изменилась.
+      файл -> домен -> тема. Кеш здесь не пишется: его обновляет
+      synthesize_taxonomy.py после успешной записи taxonomy.json (там же
+      применяется .claude/temp_files/domain-merge-map.json).
       Выход: .claude/temp_files/vault-structure-analysis.json.
+
+--temp-dir DIR - папка для входов и выходов вместо .claude/temp_files проекта (оба режима).
+Корень проекта и .env при этом прежние: путь к vault берётся из .env или VAULT_PATH.
 
 Между --scan и --collect оркестратор (SKILL.md) вызывает ровно один раз
 vault-domain-architect на весь vault. Батчей больше нет.
@@ -43,6 +47,12 @@ DOMAIN_MAP_FILENAME = "domain-map.json"
 MERGE_MAP_FILENAME = "domain-merge-map.json"
 OUTPUT_FILENAME = "vault-structure-analysis.json"
 TAXONOMY_FILENAME = "taxonomy.json"
+GRAPH_FILENAME = "topic-graph.json"
+
+# Значения status в vault-scan.json: единственный источник "что нового".
+STATUS_NEW = "new"
+STATUS_CHANGED = "changed"
+STATUS_UNCHANGED = "unchanged"
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 
@@ -62,6 +72,26 @@ BACKSLASH = chr(92)
 def get_project_root():
     """Определить корень проекта по расположению скрипта."""
     return Path(__file__).resolve().parents[4]
+
+
+def resolve_temp_dir(project_root: Path, temp_dir=None) -> Path:
+    """Папка temp_files: заданная через --temp-dir или .claude/temp_files проекта."""
+    return Path(temp_dir) if temp_dir else project_root / ".claude" / "temp_files"
+
+
+def parse_temp_dir(argv):
+    """Значение --temp-dir DIR (или --temp-dir=DIR) из argv; None, если флага нет."""
+    for i, arg in enumerate(argv):
+        if arg == "--temp-dir":
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                raise ValueError("--temp-dir требует путь к папке")
+            return argv[i + 1]
+        if arg.startswith("--temp-dir="):
+            value = arg.split("=", 1)[1]
+            if not value:
+                raise ValueError("--temp-dir требует путь к папке")
+            return value
+    return None
 
 
 def load_vault_path(project_root: Path) -> Path:
@@ -206,7 +236,7 @@ def paths_from_unclassified_section(section) -> set:
     return paths
 
 
-def load_known_paths(project_root: Path) -> set:
+def load_known_paths(project_root: Path, temp_dir=None) -> set:
     """
     Загрузить известные пути файлов из существующей taxonomy.json.
 
@@ -214,7 +244,7 @@ def load_known_paths(project_root: Path) -> set:
     которым архитектор не назначил домен, иначе каждый инкрементальный прогон
     снова объявлял бы их новыми (см. план 2026-10-04-accounted-non-domain-files).
     """
-    taxonomy = load_json(project_root / ".claude" / "temp_files" / TAXONOMY_FILENAME, None)
+    taxonomy = load_json(resolve_temp_dir(project_root, temp_dir) / TAXONOMY_FILENAME, None)
     known_paths = set()
     if not taxonomy:
         return known_paths
@@ -227,14 +257,67 @@ def load_known_paths(project_root: Path) -> set:
     return known_paths
 
 
-def load_known_filtered_paths(project_root: Path) -> set:
+def load_known_filtered_paths(project_root: Path, temp_dir=None) -> set:
     """Пути файлов, уже перечисленные в filtered_out прежней taxonomy.json."""
-    taxonomy = load_json(project_root / ".claude" / "temp_files" / TAXONOMY_FILENAME, None)
+    taxonomy = load_json(resolve_temp_dir(project_root, temp_dir) / TAXONOMY_FILENAME, None)
     if not taxonomy:
         return set()
     filtered = taxonomy.get("filtered_out") or {}
     return {f["path"] for f in filtered.get("files", [])
             if isinstance(f, dict) and isinstance(f.get("path"), str)}
+
+
+def load_off_domain_hashes(temp_dir: Path) -> dict:
+    """
+    Хеши off-domain записей taxonomy.json: {путь: content_hash} из unclassified.items[]
+    (поле content_hash) и projects.items[] (словарь content_hashes). Файла нет, он нечитаем
+    или записи старого формата без хеша - такие пути в словарь не попадают и остаются new.
+    Миграция: старые записи будут new один раз, до ближайшего synthesize_taxonomy.py --merge,
+    который допишет хеши.
+    """
+    taxonomy = load_json(temp_dir / TAXONOMY_FILENAME, None)
+    hashes = {}
+    if not isinstance(taxonomy, dict):
+        return hashes
+    for section_name in ("projects", "unclassified"):
+        section = taxonomy.get(section_name)
+        items = section.get("items") if isinstance(section, dict) else section
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("path"), str) and item.get("content_hash"):
+                hashes[item["path"].replace(BACKSLASH, "/")] = item["content_hash"]
+            per_file = item.get("content_hashes")
+            if isinstance(per_file, dict):
+                for path, content_hash in per_file.items():
+                    if isinstance(path, str) and content_hash:
+                        hashes[path.replace(BACKSLASH, "/")] = content_hash
+    return hashes
+
+
+def load_graph_hashes(temp_dir: Path):
+    """
+    Хеши файлов из узлов topic-graph.json: {путь: content_hash}, дополненные хешами записей
+    projects/unclassified из taxonomy.json (в графе их нет). Приоритет у хеша из графа.
+    Возвращает None, если графа нет или он нечитаем (сравнивать не с чем).
+    """
+    graph = load_json(temp_dir / GRAPH_FILENAME, None)
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), dict):
+        return None
+    hashes = load_off_domain_hashes(temp_dir)
+    for path, node in graph["nodes"].items():
+        if isinstance(node, dict) and node.get("kind") == "file":
+            hashes[str(path).replace(BACKSLASH, "/")] = node.get("content_hash")
+    return hashes
+
+
+def detect_status(path: str, content_hash: str, graph_hashes) -> str:
+    """Статус файла относительно графа: new | changed | unchanged."""
+    if graph_hashes is None or path not in graph_hashes:
+        return STATUS_NEW
+    if graph_hashes[path] != content_hash:
+        return STATUS_CHANGED
+    return STATUS_UNCHANGED
 
 
 def normalize_projects_section(raw_projects, scan_paths: set):
@@ -313,12 +396,13 @@ def normalize_unclassified_section(raw_unclassified, scan_paths: set):
         items.append({"path": path, "reason": reason, "suggestion": suggestion})
     return items, dropped
 
-def cmd_scan(project_root: Path, new_only: bool) -> int:
+def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False, temp_dir=None) -> int:
     """
     Шаг 1: собрать список заметок, годных к анализу, и отсеять мусор.
     Выход: vault-scan.json - вход для vault-domain-architect.
     """
-    temp_dir = project_root / ".claude" / "temp_files"
+    override = temp_dir
+    temp_dir = resolve_temp_dir(project_root, override)
     vault_path = load_vault_path(project_root)
     print("[INFO] Vault path: " + str(vault_path), file=sys.stderr)
 
@@ -340,22 +424,60 @@ def cmd_scan(project_root: Path, new_only: bool) -> int:
 
     cache = load_json(temp_dir / CACHE_FILENAME, {})
 
+    graph_hashes = None
+    taxonomy_paths = None
+    baseline = "none"
+    if new_only and baseline_taxonomy:
+        # Восстановление после несогласованного графа: новое = пути, которых нет в taxonomy.json.
+        # Изменённые файлы так не обнаружить (хешей в taxonomy.json нет), режим одноразовый.
+        taxonomy_paths = load_known_paths(project_root, override)
+        if not taxonomy_paths:
+            raise FileNotFoundError("--baseline-taxonomy: taxonomy.json не найден или пуст")
+        baseline = "taxonomy"
+        print("[WARN] --baseline-taxonomy: статус по путям taxonomy.json, changed не определяется.",
+              file=sys.stderr)
+    elif new_only:
+        graph_hashes = load_graph_hashes(temp_dir)
+        if graph_hashes is None:
+            print("[WARN] " + GRAPH_FILENAME + " не найден. Все файлы считаются новыми (полный прогон).",
+                  file=sys.stderr)
+        else:
+            baseline = "graph"
+
     print("[STEP 2] Сверка с кешем по content-hash...", file=sys.stderr)
     entries = []
     cached_count = 0
+    status_counts = {STATUS_NEW: 0, STATUS_CHANGED: 0, STATUS_UNCHANGED: 0}
     for path, content in candidate_files:
         content_hash = compute_content_hash(content)
-        is_cached = (not new_only) and (content_hash in cache)
+        is_cached = content_hash in cache
         if is_cached:
             cached_count += 1
+        if taxonomy_paths is not None:
+            status = STATUS_UNCHANGED if path in taxonomy_paths else STATUS_NEW
+        else:
+            status = detect_status(path, content_hash, graph_hashes)
+        status_counts[status] += 1
         entries.append({
             "path": path,
             "folder": str(Path(path).parent),
             "name": Path(path).name,
             "content_hash": content_hash,
             "in_cache": is_cached,
+            "status": status,
         })
     print("[OK] К анализу: " + str(len(entries)) + ", из них в кеше: " + str(cached_count), file=sys.stderr)
+    print("[OK] Новых: " + str(status_counts[STATUS_NEW]) +
+          ", изменённых: " + str(status_counts[STATUS_CHANGED]) +
+          ", без изменений: " + str(status_counts[STATUS_UNCHANGED]), file=sys.stderr)
+
+    # Защита: пути из taxonomy.json, которых нет в vault (удалены или переименованы).
+    missing = sorted(p for p in load_known_paths(project_root, override) if not (vault_path / p).exists())
+    if missing:
+        print("[WARN] В " + TAXONOMY_FILENAME + " есть пути, которых нет в vault: " +
+              str(len(missing)), file=sys.stderr)
+        for p in missing:
+            print("  - " + p, file=sys.stderr)
 
     result = {
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -363,6 +485,10 @@ def cmd_scan(project_root: Path, new_only: bool) -> int:
         "total_files": total_files,
         "candidate_count": len(entries),
         "cached_count": cached_count,
+        "baseline": baseline,
+        "new_count": status_counts[STATUS_NEW],
+        "changed_count": status_counts[STATUS_CHANGED],
+        "unchanged_count": status_counts[STATUS_UNCHANGED],
         "files": entries,
         "filtered_out": filtered_out,
         "mode": "incremental" if new_only else "full",
@@ -373,12 +499,13 @@ def cmd_scan(project_root: Path, new_only: bool) -> int:
     return 0
 
 
-def cmd_collect(project_root: Path, new_only: bool) -> int:
+def cmd_collect(project_root: Path, new_only: bool, temp_dir=None) -> int:
     """
     Шаг 2: из domain-map.json собрать структуру файл -> домен -> тема.
-    Обновляет кеш, применяет карту слияния доменов.
+    Кеш не трогает: он обновляется после записи taxonomy.json (synthesize_taxonomy.py).
     """
-    temp_dir = project_root / ".claude" / "temp_files"
+    override = temp_dir
+    temp_dir = resolve_temp_dir(project_root, override)
     vault_path = load_vault_path(project_root)
 
     scan = load_json(temp_dir / SCAN_FILENAME, None)
@@ -411,10 +538,7 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
     print("[INFO] Вне доменов: в проектах " + str(projects_count) +
           ", не распознано " + str(unclassified_count), file=sys.stderr)
 
-    merge_map = load_json(temp_dir / MERGE_MAP_FILENAME, {})
-
     path_to_domain = {}
-    path_to_essence = {}
     domains_out = []
     for dom in map_domains:
         domain_id = dom["id"]
@@ -427,7 +551,6 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
             topic_paths = []
             for p in topic.get("files", []):
                 path_to_domain[p] = domain_id
-                path_to_essence[p] = topic.get("essence", "")
                 entry = {"path": p, "name": Path(p).stem}
                 topic_paths.append(entry)
                 files_in_domain.append(entry)
@@ -453,28 +576,6 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
     if clashes:
         print("[WARN] Файлы учтены и в домене, и в projects/unclassified: " +
               ", ".join(clashes), file=sys.stderr)
-
-    cache = load_json(temp_dir / CACHE_FILENAME, {})
-    hash_by_path = {e["path"]: e["content_hash"] for e in scan.get("files", [])}
-    updated = 0
-    for path, domain_id in path_to_domain.items():
-        content_hash = hash_by_path.get(path)
-        if not content_hash:
-            continue
-        cache[content_hash] = {
-            "domain_id": domain_id,
-            "essence": path_to_essence.get(path, ""),
-            "key_concepts": [],
-        }
-        updated += 1
-
-    if merge_map:
-        for entry in cache.values():
-            if entry.get("domain_id") in merge_map:
-                entry["domain_id"] = merge_map[entry["domain_id"]]
-    save_json(temp_dir / CACHE_FILENAME, cache)
-    suffix = (", применено слияний: " + str(len(merge_map))) if merge_map else ""
-    print("[OK] Кеш обновлён: " + str(updated) + " записей" + suffix, file=sys.stderr)
 
     all_files = []
     total = 0
@@ -515,29 +616,43 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
             "vault_path": str(vault_path),
             "projects_count": projects_count,
             "unclassified_count": unclassified_count,
+            # Контракт: в инкременте domains[].files и all_files - только дельта,
+            # старые файлы доменов берутся из taxonomy.json (см. check_delta_contract).
+            "delta_only": False,
         },
     }
 
     if new_only:
-        known_paths = load_known_paths(project_root)
-        if not known_paths:
+        known_paths = load_known_paths(project_root, override)
+        graph_hashes = load_graph_hashes(temp_dir)
+        if scan.get("baseline") in ("graph", "taxonomy") or (graph_hashes is not None and "baseline" not in scan):
+            # Дельта по status из vault-scan.json: new и changed.
+            delta_paths = {e["path"] for e in scan.get("files", [])
+                           if isinstance(e, dict) and e.get("status") in (STATUS_NEW, STATUS_CHANGED)}
+            is_delta = lambda p: p in delta_paths
+        else:
+            print("[WARN] " + GRAPH_FILENAME + " не найден. Дельта по известным путям taxonomy.json "
+                  "(изменённые файлы не будут обнаружены).", file=sys.stderr)
+            is_delta = lambda p: p not in known_paths
+        if scan.get("baseline") not in ("graph", "taxonomy") and graph_hashes is None and not known_paths:
             print("[WARN] taxonomy.json не найден. Остаёмся в полном режиме.", file=sys.stderr)
             vault_data["metadata"]["mode"] = "full"
+            vault_data["metadata"]["delta_only"] = False
         else:
-            filtered_all = [a for a in all_files if a["path"] not in known_paths]
+            filtered_all = [a for a in all_files if is_delta(a["path"])]
             filtered_domains = []
             for dom in domains_out:
-                kept = [a for a in dom["files"] if a["path"] not in known_paths]
+                kept = [a for a in dom["files"] if is_delta(a["path"])]
                 if kept:
                     dom["files"] = kept
                     filtered_domains.append(dom)
             filtered_projects = []
             for project in projects_items:
-                kept = [f for f in project["files"] if f not in known_paths]
+                kept = [f for f in project["files"] if is_delta(f)]
                 if kept:
                     filtered_projects.append(dict(project, files=kept))
             filtered_unclassified = [
-                u for u in unclassified_items if u["path"] not in known_paths
+                u for u in unclassified_items if is_delta(u["path"])
             ]
             vault_data["projects"] = {
                 "count": sum(len(p["files"]) for p in filtered_projects),
@@ -550,9 +665,12 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
             # Сколько кандидатов и шума добавилось к уже учтённому - по этим
             # числам synthesize_taxonomy.py продолжает арифметику покрытия
             # поверх прежней taxonomy.json.
-            known_filtered = load_known_filtered_paths(project_root)
+            known_filtered = load_known_filtered_paths(project_root, override)
+            # Уже учтённые в прежней taxonomy.json пути (изменённые, а также new без хеша в
+            # projects/unclassified при миграции) в базу покрытия входят: второй раз их не считаем.
             vault_data["metadata"]["new_candidates_count"] = len(
-                [e for e in scan.get("files", []) if e.get("path") not in known_paths])
+                [e for e in scan.get("files", [])
+                 if is_delta(e.get("path")) and e.get("path") not in known_paths])
             vault_data["metadata"]["new_filtered_count"] = len(
                 [f for f in scan.get("filtered_out", [])
                  if isinstance(f, dict) and f.get("path") not in known_filtered])
@@ -561,9 +679,11 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
             vault_data["metadata"]["total_files"] = len(filtered_all)
             vault_data["metadata"]["total_domains"] = len(filtered_domains)
             vault_data["metadata"]["mode"] = "incremental"
-            print("[OK] Отфильтровано: " + str(len(filtered_all)) + " новых из " + str(len(known_paths)), file=sys.stderr)
+            vault_data["metadata"]["delta_only"] = True
+            print("[OK] Отфильтровано: " + str(len(filtered_all)) + " в дельте (известно путей: " + str(len(known_paths)) + ")", file=sys.stderr)
     else:
         vault_data["metadata"]["mode"] = "full"
+        vault_data["metadata"]["delta_only"] = False
 
     save_json(temp_dir / OUTPUT_FILENAME, vault_data)
     print("")
@@ -573,20 +693,23 @@ def cmd_collect(project_root: Path, new_only: bool) -> int:
     print("  - В проектах: " + str(vault_data["projects"]["count"]), file=sys.stderr)
     print("  - Не распознано: " + str(vault_data["unclassified"]["count"]), file=sys.stderr)
     print("  - Режим: " + str(vault_data["metadata"]["mode"]), file=sys.stderr)
+    print("  - delta_only: " + str(vault_data["metadata"]["delta_only"]).lower(), file=sys.stderr)
     return 0
 
 
 def main():
     """Диспетчер по режиму (--scan | --collect)."""
     new_only = "--new-only" in sys.argv
+    baseline_taxonomy = "--baseline-taxonomy" in sys.argv
     try:
+        temp_dir = parse_temp_dir(sys.argv)
         project_root = get_project_root()
         print("Корень проекта: " + str(project_root), file=sys.stderr)
 
         if "--scan" in sys.argv:
-            return cmd_scan(project_root, new_only)
+            return cmd_scan(project_root, new_only, baseline_taxonomy, temp_dir)
         elif "--collect" in sys.argv:
-            return cmd_collect(project_root, new_only)
+            return cmd_collect(project_root, new_only, temp_dir)
         else:
             print("[ERROR] Укажи режим: --scan или --collect (опционально с --new-only).", file=sys.stderr)
             return 1
