@@ -1375,7 +1375,7 @@ def run_merge(temp_dir: Path, dry_run: bool) -> int:
 
     metadata_struct = structure.get("metadata", {}) if isinstance(structure, dict) else {}
     filtered_out = (structure or {}).get("filtered_out") or existing.get("filtered_out")
-    # domain-map.json после apply_domain_patch - полная раскладка, включая projects/unclassified
+    # domain-map.json после incremental.py apply-patch - полная раскладка, включая projects/unclassified
     projects = normalize_projects_section(
         domain_map["projects"] if domain_map.get("projects") is not None else existing.get("projects"))
     unclassified = normalize_unclassified_section(

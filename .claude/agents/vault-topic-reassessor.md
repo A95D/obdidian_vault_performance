@@ -121,7 +121,7 @@ JSON, indent 2, без вывода в ответ:
 ```
 
 Схема темы - REFERENCE.md, раздел "Поле `domain_summary.topics`". Все поля
-обязательны. Результат проверяет `validate_reassessed_topics.py` и не доверяет
+обязательны. Результат проверяет `incremental.py validate-topics` и не доверяет
 ему: `has_notes` будет выведен из `note_paths`, неизвестные пути, дубли
 `topic_id`, файл без темы - ошибка (в нескольких темах файл быть может).
 

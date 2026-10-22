@@ -168,32 +168,40 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 
 ### Порядок фаз (менять нельзя)
 
+Основной путь оркестратора - драйвер `scripts/incremental.py` (команды `prepare`, `apply`,
+`reassess-input`, `finalize`, `status`, см. ниже). Эта схема - справка о порядке шагов и
+защитах; отдельные подкоманды шагов нужны для ручного разбора и повторов.
+
 ```
 1. scan      collect_vault_structure.py --scan --new-only        vault-scan.json (status)
-2. cards     build_domain_cards.py                               domain-cards.json
+2. cards     incremental.py domain-cards                         domain-cards.json
 3. architect vault-domain-architect, режим инкремента            patch.json
-4. apply     apply_domain_patch.py                               domain-map.json, domain-merge-map.json, affected-domains.json
+4. apply     incremental.py apply-patch                          domain-map.json, domain-merge-map.json, affected-domains.json
              collect_vault_structure.py --collect --new-only     vault-structure-analysis.json
 5. analyzer  vault-domain-analyzer, режим «добавление»           {domain_id}-analysis.json (только дельта)
-6. reassess  build_reassess_input.py -> vault-topic-reassessor
-             -> validate_reassessed_topics.py --domain ID        {domain_id}-topics.validated.json
+6. reassess  incremental.py build-reassess-input -> vault-topic-reassessor
+             -> incremental.py validate-topics --domain ID       {domain_id}-topics.validated.json
 7. граф      build_topic_graph.py                                topic-graph.json
 8. merge     synthesize_taxonomy.py --merge                      taxonomy.json (без LLM), затем кеш
 ```
 
 Граф строго после шагов 5-6. Дельты нет (нет `new | changed`) - шаги 2-8 не нужны.
 
-**Драйвер `scripts/incremental.py`** сворачивает детерминированные шаги в четыре команды;
-скрипты выше остаются как есть, драйвер вызывает их подпроцессами и останавливается на
-первой ошибке. LLM он не вызывает, агентов между командами запускает оркестратор:
+**Драйвер `scripts/incremental.py`** - основной путь: сворачивает детерминированные шаги в
+четыре команды (плюс `status`). Шаги 2, 4, 6 - подкоманды того же файла, драйвер вызывает
+их и `collect`/`graph`/`synthesize` подпроцессами и останавливается на первой ошибке. LLM он не вызывает, агентов между командами запускает оркестратор:
 
 | Команда | Заменяет шаги | Между командами |
 |---|---|---|
 | `incremental.py prepare` | 1-2 (scan, карточки; нет дельты - «шаги 2-8 не нужны») | архитектор -> `patch.json` |
 | `incremental.py apply [--dry-run]` | 4 (патч, `--collect --new-only`; печатает домены для анализатора) | анализаторы дельты |
-| `incremental.py reassess-input` | 6, вход (проверка свежих анализов, `build_reassess_input`) | переоценка тем |
+| `incremental.py reassess-input` | 6, вход (проверка свежих анализов, `build-reassess-input`) | переоценка тем |
 | `incremental.py finalize [--dry-run]` | 6 проверка, 7, 8 (validate по всем затронутым, граф, `--merge`, `--verify`) | - |
 | `incremental.py status` | только чтение: какой шаг следующий | - |
+
+Отдельные подкоманды (ручной запуск и повтор шага): `incremental.py domain-cards` (шаг 2),
+`apply-patch [--patch FILE] [--dry-run]` (шаг 4), `build-reassess-input` (шаг 6, вход),
+`validate-topics --domain ID [--input FILE]` (шаг 6, проверка одного ответа).
 
 Ограничения: `cleanup.py` драйвер не запускает (необратимо); `--temp-dir` пробрасывается
 всем подпроцессам, включая `collect_vault_structure.py`;
@@ -231,7 +239,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
   записью из `taxonomy.json` (`essence` и поля анализа) без нового анализа, и попадает во
   вход переоценки. Исключение - `classify` файла из `unclassified`/`projects`: прежней
   записи нет, поэтому домен идёт на анализ, даже если файл не менялся. Валидатор темы
-  (`validate_reassessed_topics.py`) читает `reassess-input`. Ошибка (ответ отклоняется):
+  (`incremental.py validate-topics`) читает `reassess-input`. Ошибка (ответ отклоняется):
   известный `known_topic_id` пропал из ответа, а его файлы остались в домене. Предупреждение
   (пишется в `warnings` в `{domain}-topics.validated.json`): тема пропала вместе с файлами,
   ушедшими из домена, или изменилась оценка темы без изменений в файлах. Агент `vault-topic-reassessor.md` самодостаточен, шкала оценок вписана в него.
@@ -248,7 +256,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
   `{domain_id}-topics.json` в схеме `domain_summary.topics`: привязка новых заметок
   к темам, оценки, новые темы, ожидаемые темы (`has_notes: false`,
   `mastery_percent` не выше 15), обновлённое `description`. Ответу не доверяем:
-  `validate_reassessed_topics.py` выводит `has_notes` из `note_paths`, сверяет
+  `incremental.py validate-topics` выводит `has_notes` из `note_paths`, сверяет
   `note_paths` с файлами домена, проверяет уникальность `topic_id`, диапазон
   `mastery_percent` 0-100 и потолок 15 у тем без заметок. Покрытие - это
   `mastery_percent` по теме (полоса и бейдж в `dashboard.html`), процента домена нет.
@@ -269,9 +277,11 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 
 | Скрипт | 0 | 1 | 2 |
 |---|---|---|---|
-| `apply_domain_patch.py` | патч применён | ошибка валидации (файл не ровно в одном месте, пустая тема), ничего не записано | - |
-| `build_reassess_input.py` | входы собраны | - | нет входного файла или анализа дельты |
-| `validate_reassessed_topics.py` | ответ годен (возможны WARN) | ошибки в ответе: переоценка домена повторяется с текстом `[FAIL]` в задании, `validated.json` руками не править | нет входов |
+| `incremental.py domain-cards` | карточки записаны | - | нет `taxonomy.json` |
+| `incremental.py apply-patch` | патч применён | ошибка валидации (файл не ровно в одном месте, пустая тема), ничего не записано | - |
+| `incremental.py build-reassess-input` | входы собраны | - | нет входного файла или анализа дельты |
+| `incremental.py validate-topics` | ответ годен (возможны WARN) | ошибки в ответе: переоценка домена повторяется с текстом `[FAIL]` в задании, `validated.json` руками не править | нет входов |
+| `incremental.py` (драйвер: `prepare`, `apply`, `reassess-input`, `finalize`) | шаг выполнен | ошибка шага (прогон остановлен) | нет входа или свежих анализов |
 | `build_topic_graph.py` | граф записан | входы не готовы, цикл `dependency` с ребром дельты, структура и граф расходятся (граф не записан) | ошибка аргументов |
 | `synthesize_taxonomy.py --merge` | `taxonomy.json` записан | нарушен инвариант (`taxonomy.json` и кеш не изменены) | нет входов или они устарели |
 | `synthesize_taxonomy.py --verify` | все проверки OK | хотя бы один `FAIL` | - |
@@ -482,7 +492,7 @@ TMP="$(mktemp -d)"
 python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect
 ```
 
-Режим Incremental (запускается после применения патча, `apply_domain_patch.py`):
+Режим Incremental (запускается после применения патча, `incremental.py apply-patch`):
 ```bash
 python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --collect --new-only
 ```
@@ -552,7 +562,7 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 - **Режим Incremental** (`--merge`):
   - Граф к Фазе 2 ещё не строился (он идёт после Фаз 2, 3 и 3б), поэтому
     `graph-dirty-domains.json` здесь не источник. Домены для анализа - из
-    `affected-domains.json` (результат `apply_domain_patch.py`) и доменов, куда
+    `affected-domains.json` (результат `incremental.py apply-patch`) и доменов, куда
     попали файлы `new | changed` из `vault-scan.json`.
   - Агент работает в режиме «добавление»: читает только файлы дельты, остальные
     записи домена берёт из `taxonomy.json`. Домены без дельты не анализируются.

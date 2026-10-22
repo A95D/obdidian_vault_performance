@@ -7,6 +7,24 @@ learning paths и фасетной навигации, а результат п�
 **[🔗 Живое демо дашборда](https://a95d.github.io/obdidian_vault_performance/demo/dashboard.demo.html)**
 на фейковых данных — показывает, как выглядит результат анализа.
 
+## Зачем это нужно
+
+Со временем хранилище заметок разрастается: конспекты, статьи, проекты, идеи. Поиск находит заметку, если вы помните нужное слово. Но он не покажет, какие темы у вас вообще есть, где знания тонкие и что стоит изучить дальше.
+
+Проект читает содержимое заметок (не только названия и папки) и отвечает на такие вопросы:
+
+- **Какие темы у меня есть?** Заметки группируются в домены, например «Базы данных» или «Продуктивность».
+- **Насколько я проработал каждую тему?** Для тем видно глубину проработки и пробелы.
+- **Что потерялось?** Заметки, которым не нашлось места, попадают в отдельные списки, и их видно.
+- **В каком порядке учить?** Строятся маршруты обучения: что идёт раньше, а что опирается на предыдущий материал.
+- **Что связано?** Заметки получают связи друг с другом.
+
+Результат открывается в дашборде `dashboard.html`: это карта ваших знаний, где можно фильтровать заметки по темам и типам и смотреть маршруты обучения.
+
+Пример: в хранилище 75 заметок. Инструмент может сказать, что 54 из них разложены по 9 темам, 13 относятся к практике проектов, 4 не легли ни в одну тему (с подсказкой, какую тему завести), а 4 отсеяны как пустые или служебные. Сверка чисел нужна, чтобы ни одна заметка не пропала молча.
+
+Полезно, если заметок много и хочется навести порядок или понять, чего не хватает. Если заметок мало, проще просмотреть их вручную.
+
 ## Что делает
 
 1. Сканирует ваш Obsidian vault по указанному пути.
@@ -134,16 +152,20 @@ python .claude/skills/semantic-taxonomy/scripts/synthesize_taxonomy.py --verify
 ```
 obdidian_vault_performance/
 ├── CLAUDE.md              ← правила репо и навигация для Claude Code
+├── CHANGELOG.md           ← история изменений
 ├── dashboard.html          ← веб-дашборд для просмотра taxonomy.json
 ├── start-dashboard.bat     ← запуск локального сервера + открытие дашборда
 ├── requirements.txt        ← python-зависимости
 ├── .env / .env.example     ← VAULT_PATH и другие переменные окружения
 ├── demo/                   ← демо-дашборд с фейковыми данными (GitHub Pages)
 └── .claude/
-    ├── agents/             ← vault-domain-architect, vault-domain-analyzer, vault-relevance-finder
-    ├── skills/             ← analyze-vault-domain, semantic-taxonomy, vault-migration
-    ├── plans/              ← технические планы
-    └── temp_files/         ← временные файлы анализа (чистятся cleanup.py)
+    ├── agents/                   ← vault-domain-architect, vault-domain-analyzer, vault-relevance-finder, vault-topic-reassessor
+    ├── skills/
+    │   ├── semantic-taxonomy/    ← SKILL.md, scripts/ (пайплайн таксономии), references/
+    │   └── analyze-vault-domain/ ← references/ (схема и примеры анализа домена)
+    ├── plans/                    ← технические планы (PLAN.md и датированные файлы)
+    ├── retrospectives/           ← рефлексия по сессиям
+    └── temp_files/               ← временные файлы анализа (чистятся scripts/cleanup.py)
 ```
 
 Пайплайн Фазы 1:
@@ -176,4 +198,7 @@ collect_vault_structure.py --collect [Python]  структура + обновл
 - Проектирование карты доменов — `.claude/agents/vault-domain-architect.md`
 - Логика анализа домена — `.claude/agents/vault-domain-analyzer.md`
 - Оркестрация построения таксономии — `.claude/skills/semantic-taxonomy/SKILL.md`
+- Переоценка тем затронутых доменов (инкремент, Фаза 3б) — `.claude/agents/vault-topic-reassessor.md`
+- Подбор связей для новых заметок — `.claude/agents/vault-relevance-finder.md`
+- Инкрементальное обновление (драйвер) — `.claude/skills/semantic-taxonomy/scripts/incremental.py`
 - Схема и примеры анализа домена — `.claude/skills/analyze-vault-domain/references/`
