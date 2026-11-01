@@ -3,6 +3,27 @@
 Все значимые изменения проекта Obsidian Vault Performance задокументированы в этом файле.
 Версионирование следует [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-11-01
+
+Плоское копирование заметок в песочницу и очистка состояния: удалены кеш, журнал графа и `llm_send.sh`.
+
+### Added
+- `llm_stage.py` - плоское копирование заметок в `agent/`: имя копии = путь внутри vault, разделитель `＼` (U+FF3C); проверка счёта и хешей
+
+### Changed
+- Результат суб-агента читается из `agent/` на диске; `llm get` не используется (песочница смонтирована)
+- Поле `boundary_flags` убрано из анализа доменов; границы пересматривает только `vault-domain-architect`
+- `SKILL.md`: ссылки на `llm get` заменены на чтение из `agent/`, упоминания `boundary_flags` убраны
+
+### Removed
+- `semantic-analysis-cache.json`, поля `in_cache` и `cached_count` в скане
+- `graph-revision-log.json` (номер ревизии в `topic-graph.json` сохранён)
+- `scripts/llm_send.sh` (заменён `llm_stage.py`)
+
+### Known issues
+- `cleanup.py`, `build_topic_graph.py`, `synthesize_taxonomy.py` без argparse: `--help` запускает работу; `cleanup.py --help` удаляет промежуточные файлы в `temp_files/`
+- `SKILL.md`, `vault-domain-analyzer.md`, `README.md` частично описывают старую схему имён (basename) и кеш
+
 ## [1.8.0] - 2026-10-22
 
 Инкрементальный конвейер таксономии: дельта по файлам, переоценка тем затронутых доменов, отправка пакетов в песочницу `llm`. Четыре скрипта инкремента объединены в `incremental.py`.
