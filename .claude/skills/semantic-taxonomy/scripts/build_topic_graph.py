@@ -76,7 +76,7 @@ def load_graph(temp_dir: Path, full_mode: bool) -> dict:
     graph_path = temp_dir / "topic-graph.json"
     if full_mode:
         # --full пересобирает узлы и рёбра, но счётчик ревизий продолжается:
-        # иначе graph-revision-log.json получит повторяющиеся номера.
+        # иначе номер ревизии начнётся с 1 и не продолжит историю графа.
         previous = load_json(graph_path, None)
         graph = empty_graph()
         if isinstance(previous, dict) and isinstance(previous.get("revision"), int):
@@ -98,19 +98,6 @@ def save_graph(temp_dir: Path, graph: dict) -> dict:
     graph["generated_at"] = datetime.now().isoformat()
     save_json(temp_dir / "topic-graph.json", graph)
     return graph
-
-
-def append_revision_log(temp_dir: Path, revision: int, dirty_domains: list) -> None:
-    """Вести graph-revision-log.json - история применённых diff'ов (research.md п.4)."""
-    log_path = temp_dir / "graph-revision-log.json"
-    log = load_json(log_path, {"entries": []})
-    log.setdefault("entries", [])
-    log["entries"].append({
-        "revision": revision,
-        "timestamp": datetime.now().isoformat(),
-        "dirty_domains": dirty_domains,
-    })
-    save_json(log_path, log)
 
 
 # === Источники данных для построения узлов ===
@@ -188,7 +175,7 @@ def composite_topic_id(domain_id: str, local_topic_id: str) -> str:
 # === Построение узлов/рёбер файлов ===
 
 def build_file_node(path: str, domain_id: str, content_hash, existing_node,
-                     domain_analyses: dict, semantic_cache: dict,
+                     domain_analyses: dict,
                      path_to_topic: dict, next_revision: int,
                      taxonomy_files_by_path: dict,
                      known_in_taxonomy: set = None,
@@ -198,8 +185,8 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
     (data-model.md, Node kind = "file"):
       1. Свежий анализ домена этого прогона (Фаза 2), если есть
       2. Иначе, если файл не новый/не изменился - прежние поля узла графа
-      3. Иначе (новый/изменившийся файл без глубокого анализа) - классификация
-         Фазы 0.2 из semantic-analysis-cache.json по content_hash
+      3. Иначе (новый/изменившийся файл без анализа домена в этом прогоне) -
+         essence и key_concepts пустые
     """
     # "Новый" файл - не встречался ни в графе, ни в taxonomy.json прошлых
     # прогонов. Это отличает истинно новую заметку от bootstrap-случая (граф
@@ -250,12 +237,9 @@ def build_file_node(path: str, domain_id: str, content_hash, existing_node,
         if isinstance(file_type, list):
             file_type = file_type[0] if file_type else None
     else:
-        # Схема кеша Фазы 1 (collect_vault_structure.py --collect): запись по
-        # content_hash = {"domain_id", "essence", "key_concepts"} - essence
-        # берётся из описания темы в domain-map.json.
-        cache_entry = semantic_cache.get(content_hash, {}) if content_hash else {}
-        essence = cache_entry.get("essence", "") or ""
-        key_concepts = cache_entry.get("key_concepts", []) or []
+        # Нет анализа домена в этом прогоне: поля пустые, до анализа узел их не получает.
+        essence = ""
+        key_concepts = []
         title = Path(path).stem
         file_type = None
 
@@ -304,7 +288,6 @@ def build_graph_state(temp_dir: Path, graph: dict, ctx: dict = None):
     """
     vault_structure = load_json(temp_dir / "vault-structure-analysis.json", {}) or {}
     taxonomy = load_json(temp_dir / "taxonomy.json", {}) or {}
-    semantic_cache = load_json(temp_dir / "semantic-analysis-cache.json", {}) or {}
     path_hash_map = load_path_hash_map(temp_dir)
     domain_analyses = load_new_domain_analyses(temp_dir)
     path_to_topic = load_path_to_topic(taxonomy)
@@ -368,7 +351,7 @@ def build_graph_state(temp_dir: Path, graph: dict, ctx: dict = None):
 
             node, is_new, is_changed = build_file_node(
                 path, domain_id, content_hash, existing_node,
-                domain_analyses, semantic_cache, path_to_topic, next_revision,
+                domain_analyses, path_to_topic, next_revision,
                 taxonomy_files_by_path, known_in_taxonomy=known_in_taxonomy,
                 scan_status=scan_status,
             )
@@ -913,7 +896,7 @@ MERGE_MAP_FILENAME = "domain-merge-map.json"
 AFFECTED_FILENAME = "affected-domains.json"
 DELTA_STATUSES = ("new", "changed")
 # Файлы, которые перезаписываются скриптом: перед записью - копия *.before.json
-BACKUP_FILENAMES = ("topic-graph.json", "graph-dirty-domains.json", "graph-revision-log.json")
+BACKUP_FILENAMES = ("topic-graph.json", "graph-dirty-domains.json")
 
 
 def resolve_domain_id(domain_id, merge_map: dict):
@@ -1368,7 +1351,6 @@ def run_apply_relevance(temp_dir: Path, results_path: Path) -> int:
         return 0
 
     graph = save_graph(temp_dir, graph)
-    append_revision_log(temp_dir, graph["revision"], [])
     print(f"[OK] Добавлено рёбер: {added}, доменов со статусом derived: {status_changed}, "
           f"revision={graph['revision']}", file=sys.stderr)
     return 0
@@ -1519,7 +1501,6 @@ def main():
         print("[INFO] Копии для отката: " + ", ".join(saved), file=sys.stderr)
 
     graph = save_graph(temp_dir, graph)
-    append_revision_log(temp_dir, graph["revision"], dirty_domains)
 
     save_dirty_domains(temp_dir, graph["revision"], dirty_domains, dirty_topics,
                         new_file_ids, changed_file_ids, relevance_required)

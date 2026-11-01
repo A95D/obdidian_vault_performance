@@ -33,17 +33,14 @@ def partial_cleanup(project_root):
     # сведений о проектах и нераспознанных файлах: удалённый, он заставил бы
     # следующий прогон проектировать карту заново вслепую (план
     # 2026-10-04-accounted-non-domain-files). Удаляется только явным --full
-    # semantic-analysis-cache.json - кеш LLM-анализа (Фаза 0), переживает
-    # full/partial cleanup, чтобы не тратить повторные вызовы API на
-    # неизменившиеся файлы; удаляется только явным --full
-    # topic-graph.json / graph-revision-log.json - накопленное состояние графа
-    # тем и доменов, переживает partial cleanup между инкрементальными
-    # прогонами (data-model.md, "Жизненный цикл временных файлов"); удаляется
-    # только явным --full. graph-dirty-domains.json НЕ входит сюда - это
-    # одноразовый артефакт прогона, чистится обычным partial cleanup.
+    # topic-graph.json - накопленное состояние графа тем и доменов, переживает
+    # partial cleanup между инкрементальными прогонами (data-model.md,
+    # "Жизненный цикл временных файлов"); удаляется только явным --full.
+    # graph-dirty-domains.json НЕ входит сюда - это одноразовый артефакт
+    # прогона, чистится обычным partial cleanup.
     final_artifacts = {
-        "taxonomy.json", "domain-map.json", "semantic-analysis-cache.json",
-        "topic-graph.json", "graph-revision-log.json",
+        "taxonomy.json", "domain-map.json",
+        "topic-graph.json",
     }
 
     deleted_files = []

@@ -5,3 +5,7 @@ __pycache__/
 .claude/retrospectives/
 .claude/plans/
 .specify/
+.secondstack/
+agent/
+.claude/skills/speckit-*/
+specs/

@@ -22,8 +22,8 @@ model: inherit
 
 ## Шаг 1. Вход
 
-Прочитай `reassess-input/{domain_id}.json` (в песочнице - рядом с этим файлом;
-в проекте - `.claude/temp_files/reassess-input/{domain_id}.json`). Поля:
+Прочитай `reassess-input/{domain_id}.json`: в проекте - `.claude/temp_files/reassess-input/{domain_id}.json`,
+в песочнице - `/workspace/.claude/temp_files/reassess-input/{domain_id}.json`. Поля:
 
 - `domain_id`, `domain_name`, `description` - текущее описание домена
 - `topics` - текущие темы: `topic_id`, `topic_name`, `summary`, `has_notes`,
