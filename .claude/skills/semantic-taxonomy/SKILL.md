@@ -71,7 +71,7 @@ grep "^VAULT_PATH=" .env
 самые тяжёлые части этого skill'а. По умолчанию выполняются субагентами
 (`vault-domain-architect`, `vault-domain-analyzer`) через Agent tool внутри
 текущей сессии — отдельный LLM API-ключ для этого не требуется. Если в системе
-настроен суб-агент `llm` (платформенная песочница, см. `~/.llm/orchestrator.md`),
+настроен суб-агент `llm` (вторая среда на этой машине, см. `~/.llm/orchestrator.md`),
 эти два шага делегируются ему. Шаг 1.2 выполняется **ровно один раз за прогон**,
 поэтому последовательность не важна.
 
@@ -153,8 +153,8 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 | 6. Validation & Cleanup | Python | - | - |
 
 **Финальные артефакты**: `.claude/temp_files/taxonomy.json`,
-`.claude/temp_files/domain-map.json`, `.claude/temp_files/semantic-analysis-cache.json`,
-`.claude/temp_files/topic-graph.json`, `.claude/temp_files/graph-revision-log.json`
+`.claude/temp_files/domain-map.json`,
+`.claude/temp_files/topic-graph.json`
 
 ---
 
@@ -162,7 +162,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 
 Цель: новые и изменённые заметки добавляются дёшево. Дорогое (чтение текстов, LLM)
 - только дельта и записи `unclassified`/`projects`; структура пересматривается по
-уже накопленным данным (`taxonomy.json`, кеш, граф), стоимость растёт от числа
+уже накопленным данным (`taxonomy.json`, граф), стоимость растёт от числа
 доменов, а не файлов. Данные файла (`essence`, `type`, `paradigm`, `components`,
 `technologies`, `dependencies`) при переезде между доменами не пересчитываются.
 
@@ -182,7 +182,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 6. reassess  incremental.py build-reassess-input -> vault-topic-reassessor
              -> incremental.py validate-topics --domain ID       {domain_id}-topics.validated.json
 7. граф      build_topic_graph.py                                topic-graph.json
-8. merge     synthesize_taxonomy.py --merge                      taxonomy.json (без LLM), затем кеш
+8. merge     synthesize_taxonomy.py --merge                      taxonomy.json (без LLM)
 ```
 
 Граф строго после шагов 5-6. Дельты нет (нет `new | changed`) - шаги 2-8 не нужны.
@@ -267,7 +267,7 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 
 Так называется режим `vault-domain-analyzer`, когда в задании указан режим
 «добавление» или список дельты. Он переопределяет шаги чтения и записи полного
-режима (границы доменов, `boundary_flags`, формат ответа и ошибки - как в полном).
+режима (формат ответа и ошибки - как в полном).
 В строке 2 сводки - число файлов дельты. Вызов анализатора для домена без дельты
 в этом режиме не делается.
 
@@ -283,9 +283,9 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 | `incremental.py validate-topics` | ответ годен (возможны WARN) | ошибки в ответе: переоценка домена повторяется с текстом `[FAIL]` в задании, `validated.json` руками не править | нет входов |
 | `incremental.py` (драйвер: `prepare`, `apply`, `reassess-input`, `finalize`) | шаг выполнен | ошибка шага (прогон остановлен) | нет входа или свежих анализов |
 | `build_topic_graph.py` | граф записан | входы не готовы, цикл `dependency` с ребром дельты, структура и граф расходятся (граф не записан) | ошибка аргументов |
-| `synthesize_taxonomy.py --merge` | `taxonomy.json` записан | нарушен инвариант (`taxonomy.json` и кеш не изменены) | нет входов или они устарели |
+| `synthesize_taxonomy.py --merge` | `taxonomy.json` записан | нарушен инвариант (`taxonomy.json` не изменён) | нет входов или они устарели |
 | `synthesize_taxonomy.py --verify` | все проверки OK | хотя бы один `FAIL` | - |
-| `llm_send` | число файлов в `llm ls` совпало | ошибка `llm put` или расхождение | неверные аргументы |
+| `llm_stage.py` | все файлы скопированы, хеши совпали | нет файла, дубль имени или расхождение хеша | неверные аргументы |
 
 Защиты:
 - **Контракт входов.** Граф не строится, если у домена с дельтой нет
@@ -308,32 +308,48 @@ total_files (в доменах) + projects.count + unclassified.count + filtered
 - **Откат.** Перед записью `taxonomy.json`, `topic-graph.json` и `domain-map.json` скрипт
   сохраняет `*.before.json` (`taxonomy.before.json`, `topic-graph.before.json`,
   `domain-map.before.json`). Ручные бэкапы не нужны.
-- **Дрейф кеша.** `semantic-analysis-cache.json` пишется после успешной записи
-  `taxonomy.json`, а не на сборке структуры. Оборванный прогон оставляет кеш прежним.
 
 ### Канал LLM
 
 Выбирается один раз за прогон по `llm-ssh test`. Шаги 3, 5 и 6 идут через `llm` (правило 8
 `CLAUDE.md`, `LLM_MODEL=<алиас>` в каждом вызове, см. «Делегирование через llm»), при
 сбое - Agent tool только для этого шага. Песочница чистится один раз (`llm clean`), до
-первого `put`.
+первой отправки заметок.
 
-### Хелпер llm_send.sh
+Как устроена среда:
+- Корень проекта смонтирован в песочнице как `/workspace`. Файлы проекта (`vault-scan.json`,
+  ТЗ агентов, `REFERENCE.md`, `reassess-input/`) суб-агент читает по абсолютному пути
+  `/workspace/<путь от корня>`. Их не копируют, `llm put` для них не нужен.
+- Рабочая папка суб-агента - `/workspace/agent` (`REMOTE_DIR` в `~/.llm/config`). Это
+  папка `agent/` проекта, поэтому результаты суб-агента видны оркестратору сразу.
+- Vault лежит вне проекта и в песочнице не виден. Его заметки копируются в `/workspace/agent`
+  через `llm_stage.py`: плоско, под basename.
+- Суб-агент видит весь проект, включая `.env`. Секреты и `.env` в ТЗ не передавать
+  (правило 8 `CLAUDE.md`).
+- Расход идёт по подписке пользователя. Каждый `--fresh` начинает холодный контекст
+  (замер 2026-10-31: около 45 тыс. токенов записи в кеш на один вызов), поэтому повторы
+  без нужды не делать.
 
-`scripts/llm_send.sh` (функция `llm_send`) - единственный способ отправить пакет в
-песочницу, ручные циклы в прогонах запрещены:
+### Хелпер llm_stage.py
+
+`scripts/llm_stage.py` - единственный способ перенести заметки vault в песочницу, ручные
+копии в прогонах запрещены. Папка `/workspace` в песочнице - живое монтирование проекта,
+поэтому скрипт копирует заметки локально, в `agent/` проекта (это и есть `/workspace/agent`).
+SSH и `llm put` не нужны. Файлы проекта скрипт не копирует: для них в ТЗ указываются пути
+`/workspace/...`.
 
 ```bash
-source .claude/skills/semantic-taxonomy/scripts/llm_send.sh
-llm_send --root "$VAULT_PATH" --extra .claude/agents/vault-domain-analyzer.md --extra .claude/temp_files/domain-cards.json
-llm_send --root "$VAULT_PATH" --paths список.txt --extra ТЗ.md
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --root "$VAULT_PATH"                    # заметки new | changed из vault-scan.json
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --root "$VAULT_PATH" --paths список.txt # явный список заметок
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --clean                                 # удалить файлы в agent/ (подпапки не трогает)
 ```
 
-Без `--paths` список строится из `vault-scan.json` (файлы `new | changed`, перевод
-строки LF, без `\r`). Хелпер проверяет уникальность basename (`llm put` кладёт
-плоско, одинаковые имена перезатирают друг друга), отправляет каждый файл с
-`</dev/null 3<&-`, пишет ошибки в `.claude/temp_files/llm_send.log` и сверяет число
-файлов в `llm ls` с ожидаемым. `llm clean` он не вызывает.
+Без `--paths` список строится из `vault-scan.json` (файлы `new | changed`). Скрипт
+проверяет уникальность basename (копии лежат плоско, одинаковые имена перезаписывают
+друг друга), копирует каждый файл и сверяет хеш SHA-256 с оригиналом. Любая ошибка
+(нет файла, дубль имени, расхождение хеша) - код выхода 1, ничего не отправлено дальше.
+Файлы `--extra` (вне проекта и вне vault) копируются как есть. Очистку `--clean` делать
+один раз за прогон, до первого копирования.
 
 ### Подводные камни llm
 
@@ -343,8 +359,11 @@ llm_send --root "$VAULT_PATH" --paths список.txt --extra ТЗ.md
   `llm put "$f" </dev/null 3<&-`. Без `</dev/null` `llm` съедает stdin цикла и цикл
   завершается с кодом 0.
 - Не глуши вывод (`>/dev/null 2>&1`): без текста ошибки причину не найти. Пиши в лог
-  (`llm_send.log`) и проверяй код возврата.
-- Голый `llm get` кладёт файл относительно текущей папки: забирай через временную папку.
+  и проверяй код возврата.
+- Песочница смонтирована: результат суб-агента сразу виден в `agent/` проекта. `llm get` не нужен, проверяй файл на диске.
+- Суб-агент стартует в `/workspace/agent`, поэтому относительный путь в ТЗ к файлу проекта
+  не найдёт. Пути к файлам проекта - только `/workspace/...`.
+- Каждый `--fresh` начинает новый контекст и платит за холодный старт. Повторы без нужды не делать.
 - Одинаковые basename в разных папках vault перезатирают друг друга - не отправлять.
 
 ---
@@ -352,7 +371,7 @@ llm_send --root "$VAULT_PATH" --paths список.txt --extra ТЗ.md
 ## Фаза 1: Сбор структуры и проектирование карты доменов
 
 Три шага: скрипт (скан и отсев мусора) → **один** субагент (проектирование
-доменов и раскладка файлов) → скрипт (сборка структуры и обновление кеша).
+доменов и раскладка файлов) → скрипт (сборка структуры).
 Внешнего справочника нет: границы доменов выводит агент из материала.
 
 ### Шаг 1.1: Скан vault
@@ -373,9 +392,6 @@ python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --sca
 frontmatter и файлы, состоящие только из вставок изображений
 (`embed_only`) - синтаксис вставок сам по себе даёт достаточно символов,
 чтобы пройти порог длины, поэтому такие строки вырезаются перед проверкой.
-Затем content-hash сверяется с `semantic-analysis-cache.json`: поле
-`in_cache` - справочное, источником «что уже в таксономии» оно не служит
-(кеш пишется после `taxonomy.json`, но не хранит путей).
 
 В режиме Incremental хеш файла сверяется с `content_hash` его узла в
 `topic-graph.json`, а для записей `projects`/`unclassified` (в графе их нет) - с
@@ -383,14 +399,14 @@ frontmatter и файлы, состоящие только из вставок �
 `status: new`, хеш отличается - `changed`, совпал - `unchanged`. Хеши off-domain
 записей пишет `synthesize_taxonomy.py --merge` (в `unclassified.items[]` поле
 `content_hash`, в `projects.items[]` словарь `content_hashes`); старые записи без хеша
-один раз остаются `new`. Нет `topic-graph.json` - прогон полный
-(сверка по кешу невозможна: в нём нет путей). Скан также печатает пути из
+один раз остаются `new`. Нет `topic-graph.json` - прогон полный.
+Скан также печатает пути из
 `taxonomy.json`, которых нет в vault (удалённые и переименованные).
 
 Выход: `.claude/temp_files/vault-scan.json` - поля `total_files`,
-`candidate_count`, `cached_count`, `new_count`, `changed_count`,
+`candidate_count`, `new_count`, `changed_count`,
 `unchanged_count`, `files` (`path`, `folder`, `name`, `content_hash`,
-`in_cache`, `status`), `filtered_out`, `mode`. `status` - единственный
+`status`), `filtered_out`, `mode`. `status` - единственный
 источник «что нового» для всех следующих шагов.
 
 ### Шаг 1.2: Проектирование карты доменов (Agent tool или llm)
@@ -433,43 +449,33 @@ Agent({
 `.claude/temp_files/`. Если `llm` вернул невалидный JSON или не создал файл -
 fallback на Agent tool (один вызов), остальной прогон не блокируется.
 
-Отправка файлов - только хелпером `scripts/llm_send.sh` (см. «Хелпер llm_send.sh»),
-ручные циклы запрещены. Подводные камни (из-за них шаг 1.2 через `llm` сорвался
-2026-10-17):
-- Список путей, записанный Python на Windows текстовым режимом, содержит
-  `\r\n`. `read -r` оставляет `\r` в пути, и `llm put` отвечает «Нет такого
-  файла/папки», хотя файл есть. Записывай список с `newline="\n"` или
-  прогоняй через `tr -d '\r'`.
-- `llm put` внутри `while read ... <&3` наследует дескриптор 3 со списком.
-  Закрывай его для вызова: `llm put "$f" </dev/null 3<&-`.
-- Не глуши вывод `llm put` (`>/dev/null 2>&1`): без текста ошибки причину не
-  найти. Пиши в лог и проверяй код возврата.
+Заметки vault - только хелпером `scripts/llm_stage.py` (см. «Хелпер llm_stage.py»),
+ручные копии запрещены. Файлы проекта читаются по путям `/workspace/...`.
 
 Порядок:
 
 ```bash
-llm clean                                             # один раз за прогон, до первого put
-llm ls </dev/null                                     # пусто, кроме . и ..
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --clean    # один раз за прогон, до первого копирования заметок
 ```
 
-Отправка: `llm put` кладёт файл под его basename в `/workspace/agent` (плоско,
-без подпапок). Поэтому до отправки проверь, что basename всех путей из
-`vault-scan.json` уникален (`os.path.basename`). Если два файла с одинаковым
-именем в разных папках - не отправляй, остановись и сообщи. Отправь:
+Файлы проекта не копируются: архитектор читает `/workspace/.claude/temp_files/vault-scan.json`
+и `/workspace/.claude/agents/vault-domain-architect.md`. Заметки кандидатов копирует хелпер:
 
 ```bash
-llm put .claude/temp_files/vault-scan.json </dev/null
-llm put .claude/agents/vault-domain-architect.md </dev/null
-# каждый файл из vault-scan.json["files"][*]["path"] - через список без \r,
-# с 3<&- и с логом ошибок (см. подводные камни выше)
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --root "$VAULT_PATH"
 ```
 
-Проверь `llm ls </dev/null`: число файлов = число кандидатов + 2.
+Хелпер проверяет уникальность basename (заметки кладутся в `/workspace/agent` плоско,
+без подпапок) и останавливается при дубле. Копируются заметки `new | changed` из скана.
+Если архитектору нужен весь vault (Full), список должен совпадать с `files`
+скана: проверь это до запуска, иначе передай явный список через `--paths`.
+
+Проверь, что в выводе хелпера число скопированных файлов совпало с ожидаемым.
 
 Запуск (в фоне, по правилу 11 `CLAUDE.md`):
 
 ```bash
-LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию из vault-domain-architect.md. Вход: vault-scan.json, поле files - список кандидатов; их заметки лежат в текущей папке под своими именами. Запиши domain-map.json строго по схеме из инструкции; пути в карте - точно как поле path в скане. В ответе - 5 строк сводки, без JSON." </dev/null
+LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию /workspace/.claude/agents/vault-domain-architect.md. Вход: /workspace/.claude/temp_files/vault-scan.json, поле files - список кандидатов; их заметки лежат в текущей папке (/workspace/agent) под своими именами. Запиши domain-map.json в текущую папку строго по схеме из инструкции; пути в карте - точно как поле path в скане. В ответе - 5 строк сводки, без JSON." </dev/null
 ```
 
 Готовность - файл `domain-map.json` в `llm ls`, а не текст ответа.
@@ -477,8 +483,7 @@ LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию из vau
 Забрать результат и проверить:
 
 ```bash
-TMP="$(mktemp -d)"
-(cd "$TMP" && llm get domain-map.json </dev/null) && mv -f "$TMP/domain-map.json" .claude/temp_files/; rm -rf "$TMP"
+test -s agent/domain-map.json && cp agent/domain-map.json .claude/temp_files/
 ```
 
 Далее `python ... collect_vault_structure.py --collect`. Его stderr должен быть
@@ -508,8 +513,7 @@ python .claude/skills/semantic-taxonomy/scripts/collect_vault_structure.py --col
 `vault-scan.json` (`files` и `filtered_out`), а удалённые старые файлы дают WARN.
 
 Читает `vault-scan.json` + `domain-map.json`, строит
-`path -> domain -> topic`, обновляет кеш
-(`content_hash -> {domain_id, essence, key_concepts}`) и применяет
+`path -> domain -> topic` и применяет
 `.claude/temp_files/domain-merge-map.json` (`{старый_id: новый_id}`), если
 карта доменов изменилась - без этого старый домен вернётся в следующем
 прогоне.
@@ -624,34 +628,29 @@ stderr. Пустые `reason`/`suggestion` у `unclassified` и пустой `wh
 - Без `LLM_MODEL` `llm` берёт модель из `~/.llm/config` или дефолт песочницы -
   так не делать. Исключение: `llm clean` и `llm-ssh test`, им модель не нужна.
 
-Перед передачей файлов прогона песочница полностью очищается (старые результаты
-прошлых прогонов иначе попадают в выборку). Очистка выполняется один раз за
-прогон, до первого `llm put`, и проверяется через `llm ls`. Если в выводе
-`llm ls` остались файлы или папки (кроме `.` и `..`), передачу не начинать.
+Перед передачей файлов прогона папка песочницы полностью очищается (старые результаты
+прошлых прогонов иначе попадают в выборку). Очистка выполняется один раз за прогон,
+до первого `llm_stage.py`. Если в папке остались файлы, передачу не начинать.
 
 ```bash
-llm clean                                             # полная очистка /workspace/agent (без модели, проверка внутри)
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --clean    # очистка agent/ (файлы, подпапки не трогает)
+llm clean                                             # полная очистка /workspace/agent (без модели)
 llm ls </dev/null                                     # повторная проверка: пусто, кроме . и ..
 grep "^VAULT_PATH=" .env                              # взять путь к vault
-llm put .claude/temp_files/vault-structure-analysis.json
-llm put <VAULT_PATH>/<файлы_домена>                   # файлы этого domain_id
-llm put .claude/agents/vault-domain-analyzer.md       # ТЗ (схема анализа)
-llm put .claude/skills/analyze-vault-domain/references/REFERENCE.md
-LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию из vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Файлы домена уже отправлены. Запиши результат в {domain_id}-analysis.json по схеме из REFERENCE.md." </dev/null
-TMP="$(mktemp -d)"                                    # забрать результат: llm get кладёт файл относительно cwd,
-(cd "$TMP" && llm get llm-phase2/{domain_id}-analysis.json </dev/null) && mv -f "$TMP/llm-phase2/{domain_id}-analysis.json" .claude/temp_files/; rm -rf "$TMP"
+python .claude/skills/semantic-taxonomy/scripts/llm_stage.py --root "$VAULT_PATH" --paths список_домена.txt   # заметки этого domain_id
+LLM_MODEL=<алиас> llm --fresh "Выполни инструкцию /workspace/.claude/agents/vault-domain-analyzer.md для domain_id=\"{domain_id}\", domain_name=\"{domain_name}\". Вход: /workspace/.claude/temp_files/vault-structure-analysis.json. Файлы домена уже в текущей папке (/workspace/agent). Запиши результат в {domain_id}-analysis.json в текущую папку по схеме /workspace/.claude/skills/analyze-vault-domain/references/REFERENCE.md." </dev/null
+cp agent/{domain_id}-analysis.json .claude/temp_files/   # результат уже в agent/ (песочница смонтирована)
 ```
 
 Очистка песочницы (`llm clean`) выполняется один раз за прогон, до первого
-`llm put`. Если шаг 1.2 уже шёл через `llm` в этом прогоне - повторно не
+копирования заметок (`llm_stage.py`). Если шаг 1.2 уже шёл через `llm` в этом прогоне - повторно не
 делай, иначе стираются результаты прошлых вызовов этого же прогона.
 
 Правила для циклов с `llm` (нарушение этих правил уже ломало прогон):
 - Каждый вызов `llm` получает `</dev/null`. Без этого `llm` читает stdin и
   съедает оставшийся список доменов цикла, при этом цикл завершается с кодом 0.
 - Список доменов читается через отдельный дескриптор (`while read ... <&3; done 3< список`).
-- Файлы забираются только через `llm get` во временной папке (блок выше): голый `llm get` кладёт файл
-  относительно текущей папки, то есть в корень проекта.
+- Результат читается из `agent/` на диске, `llm get` не использовать: песочница смонтирована, файл сразу виден в проекте.
 - Не писать вывод вызова `llm` в файлы-логи в `.claude/temp_files/` (вроде
   `_p2_{domain_id}.log`): ни один скрипт их не читает. Сводку и ошибку возвращает
   сам фоновый вызов, готовность - по `{domain_id}-analysis.json`, а не по логу.
@@ -748,8 +747,7 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
    (`affected-domains.json`) и оба домена переехавшего файла. Список пишется в
    `.claude/temp_files/graph-dirty-domains.json` (одноразовый артефакт этого прогона,
    вход для Фаз 3-6). Поэтому на первом прогоне `dirty_topics` пуст: все файлы новые.
-3. Ревизия графа инкрементируется, история пишется в
-   `.claude/temp_files/graph-revision-log.json`.
+3. Ревизия графа инкрементируется (поле `revision` в `topic-graph.json`).
 4. Рёбра `dependency` строятся из поля `dependencies` файлов в `{domain}-analysis.json`
    (Фаза 2). В полном режиме берутся все файлы с анализом, в инкрементальном - только
    новые и изменившиеся файлы со свежим анализом; остальные рёбра сохраняются. Ссылка
@@ -766,7 +764,7 @@ python .claude/skills/semantic-taxonomy/scripts/build_topic_graph.py
 **Важно про новые файлы**: в инкременте у каждого домена с дельтой обязан быть свежий
 `{domain_id}-analysis.json` (режим «добавление»), у затронутого домена -
 `{domain_id}-topics.validated.json` (Фаза 3б). Иначе граф не строится (см. «Коды выхода»).
-Essence/key_concepts дельты берутся из этого анализа, а не из кеша классификации.
+Essence/key_concepts дельты берутся из этого анализа.
 Старые узлы и рёбра сохраняются: узлы и `member_of` перестраиваются из актуальной
 раскладки (в том числе для переехавших файлов), `dependency` сохраняются, у изменённых
 файлов исходящие `dependency` пересобираются. Переименование и слияние доменов
@@ -1023,5 +1021,4 @@ python .claude/skills/semantic-taxonomy/scripts/cleanup.py
 - taxonomy.json — итог анализа
 - domain-map.json — карта доменов от архитектора, единственный носитель
   сведений о проектах и нераспознанных файлах между прогонами
-- semantic-analysis-cache.json — кеш LLM-анализа Фазы 1
-- topic-graph.json / graph-revision-log.json — состояние графа тем
+- topic-graph.json — состояние графа тем

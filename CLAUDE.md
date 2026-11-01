@@ -22,7 +22,7 @@
 | Инкремент: драйвер | `scripts/incremental.py` (`prepare`, `apply`, `reassess-input`, `finalize`, `status`) |
 | Инкремент: карточки и патч архитектора | `scripts/incremental.py domain-cards` → `domain-cards.json`; `apply-patch` (`patch.json` → `domain-map.json`, `domain-merge-map.json`, `affected-domains.json`) |
 | Инкремент: переоценка тем (Фаза 3б) | `.claude/agents/vault-topic-reassessor.md`; вход `scripts/incremental.py build-reassess-input`; проверка `validate-topics --domain ID` → `{domain_id}-topics.validated.json` |
-| Пакет файлов в песочницу `llm` | `scripts/llm_send.sh` (функция `llm_send`, лог `llm_send.log`) |
+| Заметки vault в песочницу | `scripts/llm_stage.py` (копирует в `agent/` проекта = `/workspace/agent`); файлы проекта - по путям `/workspace/...` |
 | Схема и примеры анализа домена | `.claude/skills/analyze-vault-domain/references/` |
 | Путь к vault | `.env`, переменная `VAULT_PATH` |
 | Запуск дашборда | `start-dashboard.bat` |
@@ -46,13 +46,16 @@
    - один раз за сессию проверь `llm-ssh test` (без модели), при успехе отправляй по схеме из `SKILL.md` (см. `~/.llm/orchestrator.md`); результат интегрируй и проверяй локально;
    - каждый вызов `llm` с префиксом `LLM_MODEL=<алиас модели оркестратора>` (алиасы в `SKILL.md`); не полагаться на дефолт песочницы и `~/.llm/config`; исключение - `llm clean` и `llm-ssh test`;
    - нет связи или команды `llm` - работай через Agent tool. Отправка содержимого vault в песочницу разрешена: vault и подписка принадлежат пользователю.
+   - песочница - вторая среда на этой машине. Она видит корень проекта как `/workspace` и читает файлы проекта по путям `/workspace/<путь от корня>`, без копирования. Заметки vault (вне проекта, в песочнице не видны) копируются в `/workspace/agent` только хелпером `scripts/llm_stage.py`.
+   - суб-агент видит весь проект, включая `.env`: секреты и `.env` в ТЗ не передавать.
+   - расход идёт по подписке пользователя; каждый `--fresh` платит за холодный старт, поэтому повторные вызовы без нужды не делать.
 9. Спека (`speckit-*` скиллы, `.specify/`, `specs/`) никогда не коммитится и не добавляется в git: это инструменты планирования, не часть релиза. Работа с ней локально, в отдельных сессиях.
 10. Инкремент (`synthesize_taxonomy.py --merge`) работает от дельты. Dirty = `status` `new | changed` в `vault-scan.json` (`--scan --new-only` сверяет хеш с `content_hash` в `topic-graph.json`, для `projects`/`unclassified` - с `taxonomy.json`). Без графа прогон полный. Состояние - `taxonomy.json`, `domain-map.json`, граф.
     - Структура пересматривается по накопленным данным, без чтения старых текстов: `incremental.py domain-cards` (`domain-cards.json`) → `vault-domain-architect` в режиме инкремента → `patch.json` → `incremental.py apply-patch`. Тексты читаются только у дельты и записей `unclassified`/`projects`.
     - Глубокий анализ (`vault-domain-analyzer`, режим «добавление») - только дельта; старые записи берутся из `taxonomy.json`.
     - Фаза 3б: переоценка тем затронутых доменов, ответ проверяет `validate-topics`; незатронутые домены сохраняют темы как есть.
     - `build_topic_graph.py` строго после Фаз 2, 3 и 3б: нужны свежие `{domain_id}-analysis.json` и `{domain_id}-topics.validated.json`. `--merge` не запускается без графа новее `vault-scan.json` и `domain-map.json`.
-    - `--merge` без LLM: раскладка доменов, парадигмы, `global_facets`, статистика и learning paths считаются кодом. `taxonomy.json` пишется только при выполненных инвариантах, кеш - после него.
+    - `--merge` без LLM: раскладка доменов, парадигмы, `global_facets`, статистика и learning paths считаются кодом. `taxonomy.json` пишется только при выполненных инвариантах.
     - `relevance_required` из `graph-dirty-domains.json` - новые файлы без свежего анализа домена; для них вызывается `vault-relevance-finder`, ответы применяются через `--apply-relevance`, который `graph-dirty-domains.json` не меняет. `dependency` из анализа и `related`/`dependency` от суб-агента `dirty_domains` связей не задают.
     - `--merge --full` пересчитывает прогресс всех доменов без dirty-фильтра и мёржит; `build_topic_graph.py --full` стирает связи, полученные от суб-агента.
     - Порядок и защиты - в `SKILL.md`.

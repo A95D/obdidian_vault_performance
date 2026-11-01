@@ -16,7 +16,7 @@
   --temp-dir DIR      директория temp_files (по умолчанию .claude/temp_files проекта)
 
 Запись taxonomy.json только при выполненных инвариантах; перед записью копия
-taxonomy.before.json, кеш semantic-analysis-cache.json обновляется после записи.
+taxonomy.before.json.
 """
 
 import json
@@ -971,7 +971,6 @@ MERGE_MAP_FILENAME = "domain-merge-map.json"
 AFFECTED_FILENAME = "affected-domains.json"
 GRAPH_FILENAME = "topic-graph.json"
 STRUCTURE_FILENAME = "vault-structure-analysis.json"
-CACHE_FILENAME = "semantic-analysis-cache.json"
 DELTA_STATUSES = ("new", "changed")
 # Производные поля: пересчитываются по всем доменам, из сравнения неизменности исключены
 DERIVED_DOMAIN_FIELDS = ("recommended_topics",)
@@ -1281,46 +1280,6 @@ def stamp_off_domain_hashes(temp_dir: Path, taxonomy: dict) -> int:
     return stamped
 
 
-def update_semantic_cache(temp_dir: Path, taxonomy: dict) -> int:
-    """
-    Инвариант 3f: кеш hash -> {domain_id, essence, key_concepts} обновляется только после
-    успешной записи taxonomy.json. Хеши путей берутся из vault-scan.json, domain_id в кеше
-    приводится к актуальному по domain-merge-map.json. Возвращает число записанных записей.
-    """
-    scan = read_json_file(temp_dir / SCAN_FILENAME)
-    if not isinstance(scan, dict):
-        print("[WARN] Нет " + SCAN_FILENAME + ": кеш " + CACHE_FILENAME + " не обновлён", file=sys.stderr)
-        return 0
-    hash_by_path = {e["path"]: e.get("content_hash") for e in scan.get("files", []) or []
-                    if isinstance(e, dict) and isinstance(e.get("path"), str)}
-    cache = read_json_file(temp_dir / CACHE_FILENAME, {})
-    if not isinstance(cache, dict):
-        cache = {}
-    updated = 0
-    for domain in taxonomy.get("domains", []) or []:
-        for f in domain.get("files", []) or []:
-            if not isinstance(f, dict):
-                continue
-            content_hash = hash_by_path.get(f.get("path"))
-            if not content_hash:
-                continue
-            cache[content_hash] = {
-                "domain_id": domain["domain_id"],
-                "essence": f.get("essence", ""),
-                "key_concepts": f.get("key_concepts", []) or [],
-            }
-            updated += 1
-    merge_map = read_json_file(temp_dir / MERGE_MAP_FILENAME, {}) or {}
-    if merge_map:
-        for entry in cache.values():
-            if isinstance(entry, dict) and entry.get("domain_id") in merge_map:
-                entry["domain_id"] = resolve_domain_id(entry["domain_id"], merge_map)
-    write_json_file(temp_dir / CACHE_FILENAME, cache)
-    suffix = (", применено слияний: " + str(len(merge_map))) if merge_map else ""
-    print("[OK] Кеш обновлён после записи taxonomy.json: " + str(updated) + " записей" + suffix, file=sys.stderr)
-    return updated
-
-
 def run_merge(temp_dir: Path, dry_run: bool) -> int:
     """
     Фаза 5: слияние в taxonomy.json без LLM. Раскладка - domain-map.json, затронутые домены -
@@ -1416,7 +1375,7 @@ def run_merge(temp_dir: Path, dry_run: bool) -> int:
     if problems:
         for p in problems:
             print("[FAIL] " + p, file=sys.stderr)
-        print("[FAIL] Нарушено инвариантов: " + str(len(problems)) + ". taxonomy.json и кеш не изменены", file=sys.stderr)
+        print("[FAIL] Нарушено инвариантов: " + str(len(problems)) + ". taxonomy.json не изменён", file=sys.stderr)
         return 1
 
     if dry_run:
@@ -1425,7 +1384,6 @@ def run_merge(temp_dir: Path, dry_run: bool) -> int:
         return 0
 
     save_taxonomy_with_backup(temp_dir, taxonomy)
-    update_semantic_cache(temp_dir, taxonomy)
     print("\n[SUCCESS] Слияние в taxonomy.json завершено", file=sys.stderr)
     return 0
 
@@ -1532,12 +1490,11 @@ def main():
         failed = failed_checks(checks)
         if failed:
             print(f"[FAIL] Провалено проверок: {len(failed)} - {', '.join(failed)}. "
-                  "taxonomy.json и кеш не изменены", file=sys.stderr)
+                  "taxonomy.json не изменён", file=sys.stderr)
             return 1
 
-        # Сохранить taxonomy.json (с копией прежнего в taxonomy.before.json), затем обновить кеш
+        # Сохранить taxonomy.json (с копией прежнего в taxonomy.before.json)
         save_taxonomy_with_backup(temp_dir, taxonomy)
-        update_semantic_cache(temp_dir, taxonomy)
 
         print("\n[SUCCESS] Синтез таксономии завершён", file=sys.stderr)
         return 0

@@ -8,15 +8,14 @@
       Сканирует все .md файлы vault и прогоняет их через дешёвый
       эвристический пре-фильтр шума (без LLM): служебные папки, пустые
       заметки, заметки состоящие только из вставок изображений. Сверяет
-      content-hash с кешем, чтобы отделить новое от неизменившегося.
+      content-hash с topic-graph.json, чтобы отделить новое от неизменившегося.
       Выход: .claude/temp_files/vault-scan.json.
 
   --collect [--new-only] [--temp-dir DIR]
       После того как vault-domain-architect отработал и записал
       .claude/temp_files/domain-map.json, собирает финальную структуру
-      файл -> домен -> тема. Кеш здесь не пишется: его обновляет
-      synthesize_taxonomy.py после успешной записи taxonomy.json (там же
-      применяется .claude/temp_files/domain-merge-map.json).
+      файл -> домен -> тема и применяет .claude/temp_files/domain-merge-map.json
+      (`{старый_id: новый_id}`), если карта доменов изменилась.
       Выход: .claude/temp_files/vault-structure-analysis.json.
 
 --temp-dir DIR - папка для входов и выходов вместо .claude/temp_files проекта (оба режима).
@@ -41,7 +40,6 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-CACHE_FILENAME = "semantic-analysis-cache.json"
 SCAN_FILENAME = "vault-scan.json"
 DOMAIN_MAP_FILENAME = "domain-map.json"
 MERGE_MAP_FILENAME = "domain-merge-map.json"
@@ -167,7 +165,7 @@ def classify_as_noise(relative_path: str, content: str):
 
 
 def compute_content_hash(content: str) -> str:
-    """SHA256 хеш содержимого файла (для кеша анализа)."""
+    """SHA256 хеш содержимого файла (для сверки статуса файла)."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -422,8 +420,6 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
             candidate_files.append((path, content))
     print("[OK] Отсеяно как мусор: " + str(len(filtered_out)), file=sys.stderr)
 
-    cache = load_json(temp_dir / CACHE_FILENAME, {})
-
     graph_hashes = None
     taxonomy_paths = None
     baseline = "none"
@@ -444,15 +440,11 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
         else:
             baseline = "graph"
 
-    print("[STEP 2] Сверка с кешем по content-hash...", file=sys.stderr)
+    print("[STEP 2] Сверка по content-hash...", file=sys.stderr)
     entries = []
-    cached_count = 0
     status_counts = {STATUS_NEW: 0, STATUS_CHANGED: 0, STATUS_UNCHANGED: 0}
     for path, content in candidate_files:
         content_hash = compute_content_hash(content)
-        is_cached = content_hash in cache
-        if is_cached:
-            cached_count += 1
         if taxonomy_paths is not None:
             status = STATUS_UNCHANGED if path in taxonomy_paths else STATUS_NEW
         else:
@@ -463,10 +455,9 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
             "folder": str(Path(path).parent),
             "name": Path(path).name,
             "content_hash": content_hash,
-            "in_cache": is_cached,
             "status": status,
         })
-    print("[OK] К анализу: " + str(len(entries)) + ", из них в кеше: " + str(cached_count), file=sys.stderr)
+    print("[OK] К анализу: " + str(len(entries)), file=sys.stderr)
     print("[OK] Новых: " + str(status_counts[STATUS_NEW]) +
           ", изменённых: " + str(status_counts[STATUS_CHANGED]) +
           ", без изменений: " + str(status_counts[STATUS_UNCHANGED]), file=sys.stderr)
@@ -484,7 +475,6 @@ def cmd_scan(project_root: Path, new_only: bool, baseline_taxonomy: bool = False
         "vault_path": str(vault_path),
         "total_files": total_files,
         "candidate_count": len(entries),
-        "cached_count": cached_count,
         "baseline": baseline,
         "new_count": status_counts[STATUS_NEW],
         "changed_count": status_counts[STATUS_CHANGED],
