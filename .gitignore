@@ -9,3 +9,4 @@ __pycache__/
 agent/
 .claude/skills/speckit-*/
 specs/
+.rgignore
